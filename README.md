@@ -1,1 +1,1 @@
-# lily-mcp
+# lily
