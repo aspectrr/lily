@@ -1,13 +1,24 @@
-# Lily MCP Allowlist Configuration
+# Lily MCP Configuration
+#
+# Location: ~/.config/lily/lily.yaml (run "lily config-path" to find it)
 #
 # This file customizes which commands are available to the MCP server.
 # It can only ADD commands to the base allowlist — the hardcoded safety
 # restrictions (blocking rm, sudo, bash, python, etc.) cannot be overridden.
 #
-# Location: ~/.config/lily/allowlist.yaml
-# Or run: lily config-path to find where to put this file.
-#
 # After editing, validate with: lily validate-config
+
+# ── Execution Limits ──────────────────────────────────────────────
+
+# Minimum interval between commands. Prevents agents from flooding hosts.
+# Default: "1s" (1 command per second). Set to "500ms" for faster, "5s" for stricter.
+rate_limit: "1s"
+
+# Maximum output (stdout + stderr) captured per command, in bytes.
+# Default: 1048576 (1 MB). Minimum: 1024 (1 KB).
+max_output_bytes: 1048576
+
+# ── Command Allowlist ────────────────────────────────────────────
 
 # Extra commands to allow beyond the built-in allowlist.
 # These are still subject to metacharacter checks (no $(), backticks, >, etc.)

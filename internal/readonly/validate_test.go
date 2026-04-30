@@ -44,8 +44,6 @@ func TestValidateCommand_Allowed(t *testing.T) {
 		"stat /etc/passwd",
 		"head -5 /etc/passwd",
 		"tail -20 /var/log/syslog",
-		"env",
-		"printenv PATH",
 		"date",
 		"which nginx",
 		"hostname",
@@ -70,7 +68,6 @@ func TestValidateCommand_Allowed(t *testing.T) {
 		"ps aux | grep nginx | awk '{print $2}'",
 		"ls /etc && cat /etc/hostname",
 		"uname -a ; hostname",
-		"FOO=bar env",
 		"find /etc | xargs grep pattern",
 		"echo foo | xargs",
 		"sed -n 's/foo/bar/p' file",
@@ -163,6 +160,19 @@ func TestValidateCommand_Blocked(t *testing.T) {
 		{"scp file user@host:/tmp", "scp transfers files"},
 		{"rsync -av /src /dst", "rsync modifies files"},
 		{"crontab -e", "crontab modifies cron"},
+		{"env", "env leaks environment variables"},
+		{"printenv", "printenv leaks environment variables"},
+		{"FOO=bar cat /etc/hosts", "env var assignment"},
+		{"LD_PRELOAD=/tmp/evil.so cat /etc/hosts", "LD_PRELOAD injection"},
+		{"curl http://169.254.169.254/latest/meta-data/", "curl SSRF cloud metadata"},
+		{"curl http://100.100.100.200/latest/meta-data/", "curl SSRF alibaba metadata"},
+		{"curl http://metadata.google.internal/computeMetadata/v1/", "curl SSRF GCP metadata"},
+		{"curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/", "curl SSRF with flags"},
+		{"echo ${PATH}", "parameter expansion ${}"},
+		{"echo \"${HOME}\"", "parameter expansion in double quotes"},
+		{"echo ${!PREFIX*}", "indirect variable expansion"},
+		{"echo $HOME", "variable expansion $var"},
+		{"echo \"$PATH\"", "variable expansion in double quotes"},
 	}
 
 	for _, tc := range blocked {
@@ -413,5 +423,146 @@ func TestBaseCommandsList(t *testing.T) {
 	}
 	if !sort.StringsAreSorted(cmds) {
 		t.Error("expected sorted")
+	}
+}
+
+// --- Security bypass regression tests ---
+
+func TestValidateCommand_DoubleQuoteCommandSubstitution(t *testing.T) {
+	// $(...) inside double quotes IS expanded by the shell and MUST be blocked
+	for _, cmd := range []string{
+		`echo "$(rm -rf /)"`,
+		`cat "$(cat /etc/shadow)"`,
+		`echo "$(whoami)"`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked ($() in double quotes)", cmd)
+		}
+	}
+}
+
+func TestValidateCommand_DoubleQuoteBacktickSubstitution(t *testing.T) {
+	// Backticks inside double quotes IS expanded by the shell and MUST be blocked
+	for _, cmd := range []string{
+		"echo \"`rm -rf /`\"",
+		"cat \"`whoami`\"",
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked (backtick in double quotes)", cmd)
+		}
+	}
+}
+
+func TestValidateCommand_SingleQuoteSubstitution(t *testing.T) {
+	// $(...) and backticks inside single quotes are NOT expanded, should be allowed
+	for _, cmd := range []string{
+		`echo '$(rm -rf /)'`,
+		`echo 'hello > world'`,
+		`cat '$(whoami)'`,
+	} {
+		if err := ValidateCommand(cmd); err != nil {
+			t.Errorf("expected %q allowed (literal in single quotes), got: %v", cmd, err)
+		}
+	}
+}
+
+func TestValidateCommand_InputRedirection(t *testing.T) {
+	for _, cmd := range []string{
+		`cat < /etc/shadow`,
+		`cat </etc/shadow`,
+		`head < /var/log/syslog`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked (input redirection)", cmd)
+		}
+	}
+}
+
+func TestValidateCommand_HereDoc(t *testing.T) {
+	for _, cmd := range []string{
+		`cat <<EOF`,
+		`cat <<< "test"`,
+		`cat << 'EOF'`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked (here-doc/here-string)", cmd)
+		}
+	}
+}
+
+func TestValidateCommand_Subshells(t *testing.T) {
+	for _, cmd := range []string{
+		`cat /etc/hosts; (rm -rf /)`,
+		`(cat /etc/hosts)`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked (subshell)", cmd)
+		}
+	}
+}
+
+func TestValidateCommand_AwkSystem(t *testing.T) {
+	for _, cmd := range []string{
+		`awk 'BEGIN {system("rm -rf /")}'`,
+		`awk 'BEGIN{system("ls")}'`,
+		`awk 'BEGIN { system("id") }'`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked (awk system())", cmd)
+		}
+	}
+	// $ inside single quotes must still work (awk, sed programs)
+	for _, cmd := range []string{
+		`awk '{print $1}' /etc/hosts`,
+		`awk '/pattern/ {print $2}' file`,
+		`ps aux | awk '{print $2}'`,
+		`sed -n 's/foo/bar/p' file`,
+		`echo '$HOME'`,
+		`grep '$pattern' file`,
+	} {
+		if err := ValidateCommand(cmd); err != nil {
+			t.Errorf("expected %q allowed ($ in single quotes), got: %v", cmd, err)
+		}
+	}
+}
+
+func TestValidateCommand_FindExec(t *testing.T) {
+	for _, cmd := range []string{
+		`find /etc -name "*.conf" -exec cat {} \;`,
+		`find /tmp -execdir ls {} +`,
+		`find / -ok rm {} \;`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked (find -exec)", cmd)
+		}
+	}
+	// find without -exec should still work
+	for _, cmd := range []string{
+		`find /etc -name "*.conf" | head -10`,
+		`find /var/log -mtime +7`,
+	} {
+		if err := ValidateCommand(cmd); err != nil {
+			t.Errorf("expected %q allowed (safe find), got: %v", cmd, err)
+		}
+	}
+}
+
+func TestValidateCommand_SedWrite(t *testing.T) {
+	for _, cmd := range []string{
+		`sed -n 'w /tmp/out' /etc/hosts`,
+		`sed 's/foo/bar/w /tmp/out' file`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked (sed write)", cmd)
+		}
+	}
+	// Safe sed should still work
+	for _, cmd := range []string{
+		`sed -n 's/foo/bar/p' file`,
+		`sed 's/foo/bar/g' file`,
+	} {
+		if err := ValidateCommand(cmd); err != nil {
+			t.Errorf("expected %q allowed (safe sed), got: %v", cmd, err)
+		}
 	}
 }
