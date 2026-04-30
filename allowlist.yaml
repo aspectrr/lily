@@ -1,0 +1,62 @@
+# Lily MCP Allowlist Configuration
+#
+# This file customizes which commands are available to the MCP server.
+# It can only ADD commands to the base allowlist — the hardcoded safety
+# restrictions (blocking rm, sudo, bash, python, etc.) cannot be overridden.
+#
+# Location: ~/.config/lily/allowlist.yaml
+# Or run: lily config-path to find where to put this file.
+#
+# After editing, validate with: lily validate-config
+
+# Extra commands to allow beyond the built-in allowlist.
+# These are still subject to metacharacter checks (no $(), backticks, >, etc.)
+# and any subcommand restrictions defined below.
+extra_commands:
+  # - docker      # Allow docker commands (docker ps, docker logs, etc.)
+  # - kubectl     # Allow kubectl commands
+  # - crictl      # Allow crictl commands
+
+# Subcommand restrictions for extra commands.
+# Only the listed subcommands/flags will be allowed.
+# If a command is listed here without subcommands, all subcommands are allowed.
+extra_subcommand_restrictions:
+  # docker:
+  #   - ps
+  #   - logs
+  #   - inspect
+  #   - stats
+  #   - top
+  #   - port
+  #   - history
+  #   - events
+  #   - images
+  #   - network ls
+  #   - volume ls
+  # kubectl:
+  #   - get
+  #   - describe
+  #   - logs
+  #   - top
+  #   - explain
+  #   - api-resources
+  #   - api-versions
+
+# Extra blocked flags for specific commands.
+# These add to the built-in blocked flags (e.g., sed -i, curl -X).
+extra_blocked_flags:
+  # docker:
+  #   - exec
+  #   - run
+  #   - rm
+  #   - rmi
+  #   - build
+  #   - push
+  #   - pull
+  # kubectl:
+  #   - delete
+  #   - apply
+  #   - create
+  #   - edit
+  #   - patch
+  #   - replace
