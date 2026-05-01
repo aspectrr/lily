@@ -428,6 +428,11 @@ func validateSedArgs(tokens []string, allowed map[string]bool) error {
 		if strings.Contains(tok, "w ") || strings.Contains(tok, "w\t") || strings.Contains(tok, "w/") {
 			return fmt.Errorf("sed file write is not allowed in read-only mode")
 		}
+		// Bare w at start of token: wfoo, w.ssh/keys, wout.txt
+		// Catches write commands without an address prefix that sedWriteRe misses.
+		if len(tok) > 1 && tok[0] == 'w' && tok[1] != ' ' && tok[1] != '\t' {
+			return fmt.Errorf("sed file write is not allowed in read-only mode")
+		}
 		if sedWriteRe.MatchString(tok) {
 			return fmt.Errorf("sed file write is not allowed in read-only mode")
 		}

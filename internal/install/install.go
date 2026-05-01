@@ -276,7 +276,10 @@ func dirExists(path string) bool {
 // FindBinary attempts to locate the lily binary.
 func FindBinary() string {
 	// Check common locations
-	home, _ := os.UserHomeDir() //nolint:errcheck // FindBinary has safe fallbacks when home is empty
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "" // fall back to non-home candidates
+	}
 	candidates := []string{
 		filepath.Join(".", "bin", "lily"),
 		filepath.Join(".", "lily"),

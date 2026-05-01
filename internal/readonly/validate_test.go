@@ -556,6 +556,8 @@ func TestValidateCommand_SedWrite(t *testing.T) {
 		`sed '1wout.txt' file`,
 		`sed 's/a/b/wbar' file`,
 		`sed '1w/tmp/evil' file`,
+		`sed 'wfoo' file`,                         // bare w without address prefix
+		`sed 'w.ssh/authorized_keys' /etc/passwd`, // bare w targeting dotfiles
 	} {
 		if err := ValidateCommand(cmd); err == nil {
 			t.Errorf("expected %q to be blocked (sed write)", cmd)
