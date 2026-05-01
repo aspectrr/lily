@@ -18,8 +18,8 @@ type Target struct {
 
 // KnownTargets returns all known agent targets on this system.
 func KnownTargets() []Target {
-	home, _ := os.UserHomeDir()
-	if home == "" {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
 		return nil
 	}
 
@@ -276,7 +276,7 @@ func dirExists(path string) bool {
 // FindBinary attempts to locate the lily binary.
 func FindBinary() string {
 	// Check common locations
-	home, _ := os.UserHomeDir()
+	home, _ := os.UserHomeDir() //nolint:errcheck // FindBinary has safe fallbacks when home is empty
 	candidates := []string{
 		filepath.Join(".", "bin", "lily"),
 		filepath.Join(".", "lily"),

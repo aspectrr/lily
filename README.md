@@ -210,6 +210,16 @@ lily uses the user's existing SSH credentials:
 
 No special setup or server-side installation is needed. If you can `ssh web1` from your terminal, lily can too.
 
+### Host key verification
+
+Lily uses **Trust On First Use (TOFU)** for SSH host key verification:
+
+- **First connection** to a host → the host key is automatically recorded in `~/.ssh/known_hosts`
+- **Subsequent connections** → the key is verified against the recorded value
+- **Key mismatch** → the connection is **rejected** with a clear MITM warning
+
+If `~/.ssh/known_hosts` doesn't exist, Lily creates it automatically. No manual setup required.
+
 ### What runs on the remote
 
 The validated command is sent over SSH and executed by the remote host's default shell. No agent, daemon, or restricted shell is installed on the remote — all safety enforcement happens client-side in the compiled binary.
@@ -405,7 +415,7 @@ Lily uses a 7-layer defense-in-depth pipeline:
 4. **Pipeline splitter** — validates each segment independently
 5. **Per-segment validation** — allowlist, blocklist, subcommand restrictions, blocked flags, argument validators
 6. **Command sanitizer** — reconstructs the entire command with safe single-quoting
-7. **SSH transport** — output caps, timeouts, host key verification
+7. **SSH transport** — output caps, timeouts, Trust On First Use (TOFU) host key verification
 
 For the full security model, threat analysis, and bypass vectors, see [SECURITY.md](SECURITY.md).
 

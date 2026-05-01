@@ -406,13 +406,32 @@ func validateAwkArgs(tokens []string, allowed map[string]bool) error {
 	return nil
 }
 
+// sedWriteRe matches the sed `w` (write-to-file) command when `w` appears
+// immediately after a line-number address or closing brace, with no space separator.
+// For example: `1wfoo`, `$wout.txt`, `2w.ssh/keys`.
+// sedSubstWriteRe matches `w` used as a substitution write flag: `s/a/b/wfile`
+// (w after the closing delimiter of a substitution command).
+// These complement the strings.Contains checks which handle `w /path` etc.
+var sedWriteRe = regexp.MustCompile(`[0-9$\}]w[^\s\;/\}]+`)
+var sedSubstWriteRe = regexp.MustCompile(`s/[^/]*/[^/]*/w\S`)
+
 func validateSedArgs(tokens []string, allowed map[string]bool) error {
 	for _, tok := range tokens[1:] {
 		if strings.HasPrefix(tok, "-") {
 			continue
 		}
-		// Block sed write-to-file commands: w /path, w\t/path
-		if strings.Contains(tok, "w ") || strings.Contains(tok, "w\t") || strings.Contains(tok, "w/") {
+		// Block sed write-to-file commands:
+		// - w /path, w\t/path (w followed by whitespace)
+		// - w/out, w.ssh/keys (w followed by / or .)
+		// - 1wfoo, $wout.txt (w after line-number address with no separator)
+		// - s/a/b/wbar (w as substitution write flag)
+		if strings.Contains(tok, "w ") || strings.Contains(tok, "w\t") || strings.Contains(tok, "w/") || strings.Contains(tok, "w.") {
+			return fmt.Errorf("sed file write is not allowed in read-only mode")
+		}
+		if sedWriteRe.MatchString(tok) {
+			return fmt.Errorf("sed file write is not allowed in read-only mode")
+		}
+		if sedSubstWriteRe.MatchString(tok) {
 			return fmt.Errorf("sed file write is not allowed in read-only mode")
 		}
 	}

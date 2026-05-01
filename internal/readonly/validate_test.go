@@ -551,6 +551,11 @@ func TestValidateCommand_SedWrite(t *testing.T) {
 	for _, cmd := range []string{
 		`sed -n 'w /tmp/out' /etc/hosts`,
 		`sed 's/foo/bar/w /tmp/out' file`,
+		`sed '1w.ssh/authorized_keys' /etc/passwd`,
+		`sed '1wfoo' file`,
+		`sed '1wout.txt' file`,
+		`sed 's/a/b/wbar' file`,
+		`sed '1w/tmp/evil' file`,
 	} {
 		if err := ValidateCommand(cmd); err == nil {
 			t.Errorf("expected %q to be blocked (sed write)", cmd)
@@ -560,6 +565,8 @@ func TestValidateCommand_SedWrite(t *testing.T) {
 	for _, cmd := range []string{
 		`sed -n 's/foo/bar/p' file`,
 		`sed 's/foo/bar/g' file`,
+		`sed -n 's/word/replacement/p' file`,
+		`sed 's/two/three/g' file`,
 	} {
 		if err := ValidateCommand(cmd); err != nil {
 			t.Errorf("expected %q allowed (safe sed), got: %v", cmd, err)

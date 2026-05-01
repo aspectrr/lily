@@ -118,7 +118,7 @@ the remote shell performs its own parsing and expansion.
 │  5f. Argument Validators (command-specific deep inspection)     │
 │      • xargs  — target command must be in allowlist             │
 │      • awk    — blocks system(), pipe-to-cmd, coproc            │
-│      • sed    — blocks w (write-to-file) patterns               │
+│      • sed    — blocks w (write-to-file) including no-separator │
 │      • curl   — blocks cloud metadata SSRF (169.254.x.x, etc.) │
 │      • openssl — blocks req -new/-signkey, s_client -proxy      │
 │                                                                 │
@@ -146,10 +146,13 @@ the remote shell performs its own parsing and expansion.
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  LAYER 7: SSH Transport                                         │
+│  LAYER 7: SSH Transport (Trust On First Use)                    │
 │  sshexec.Executor.Run()                                         │
 │                                                                 │
-│  • Verifies host key against ~/.ssh/known_hosts                 │
+│  • Host key verification via Trust On First Use (TOFU):        │
+│    - First connection: host key is recorded in known_hosts      │
+│    - Subsequent: key verified against recorded value            │
+│    - Key mismatch: connection REJECTED (MITM protection)        │
 │  • Authenticates via SSH agent or key files                     │
 │  • Sends sanitized command via session.Run(command)              │
 │  • Caps output at configurable limit (default 1 MB)             │
@@ -529,6 +532,7 @@ configured sandbox creates a defense-in-depth posture where:
 3. The agent **cannot** modify SSH config or Lily config (read-only mounts)
 4. The agent **cannot** flood hosts (rate limiter caps command frequency)
 5. The agent **cannot** exfiltrate via SSRF (cloud metadata IPs blocked)
+6. The agent **cannot** MITM connections (TOFU host key verification)
 
 ---
 
