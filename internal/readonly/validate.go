@@ -422,10 +422,10 @@ func validateSedArgs(tokens []string, allowed map[string]bool) error {
 		}
 		// Block sed write-to-file commands:
 		// - w /path, w\t/path (w followed by whitespace)
-		// - w/out, w.ssh/keys (w followed by / or .)
+		// - w/out (w followed by /)
 		// - 1wfoo, $wout.txt (w after line-number address with no separator)
 		// - s/a/b/wbar (w as substitution write flag)
-		if strings.Contains(tok, "w ") || strings.Contains(tok, "w\t") || strings.Contains(tok, "w/") || strings.Contains(tok, "w.") {
+		if strings.Contains(tok, "w ") || strings.Contains(tok, "w\t") || strings.Contains(tok, "w/") {
 			return fmt.Errorf("sed file write is not allowed in read-only mode")
 		}
 		if sedWriteRe.MatchString(tok) {

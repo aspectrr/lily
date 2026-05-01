@@ -567,6 +567,8 @@ func TestValidateCommand_SedWrite(t *testing.T) {
 		`sed 's/foo/bar/g' file`,
 		`sed -n 's/word/replacement/p' file`,
 		`sed 's/two/three/g' file`,
+		`sed 's/w.txt/bar/g' file`,
+		`sed 's/flow.txt/bar/g' file`,
 	} {
 		if err := ValidateCommand(cmd); err != nil {
 			t.Errorf("expected %q allowed (safe sed), got: %v", cmd, err)
