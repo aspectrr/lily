@@ -275,6 +275,9 @@ func cleanKnownHosts() {
 		lines = append(lines, line)
 	}
 	os.WriteFile(knownHosts, []byte(strings.Join(lines, "\n")), 0600)
+	// Ignore write errors — this is best-effort cleanup for tests.
+	// A failure here will surface as a host key mismatch later, which
+	// is more actionable than failing the entire test suite startup.
 }
 
 // waitForSSH retries SSH connections until the host responds, with a 60s timeout.

@@ -416,15 +416,14 @@ func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
 // ReadFrom shadows bytes.Buffer.ReadFrom to prevent io.Copy from bypassing
 // our Write-based limit enforcement. io.Copy checks if the destination
 // implements io.ReaderFrom and prefers it over calling Write in a loop.
+//
+// We rely on Write to set truncated when data is genuinely dropped (strict
+// overflow). This avoids false-positive truncation reports when the output
+// is exactly limit bytes — the pre-check (>= limit) would incorrectly fire
+// on exact equality even though no data was lost.
 func (lb *limitedBuffer) ReadFrom(r io.Reader) (n int64, err error) {
 	buf := make([]byte, 32*1024)
 	for {
-		if lb.limit > 0 && int64(lb.Buffer.Len()) >= lb.limit {
-			lb.truncated = true
-			// Drain the reader to avoid blocking the SSH channel.
-			_, _ = io.Copy(io.Discard, r)
-			return n, nil
-		}
 		nr, readErr := r.Read(buf)
 		if nr > 0 {
 			nw, writeErr := lb.Write(buf[:nr])
@@ -438,6 +437,12 @@ func (lb *limitedBuffer) ReadFrom(r io.Reader) (n int64, err error) {
 				readErr = nil
 			}
 			return n, readErr
+		}
+		// Write sets lb.truncated when data is actually dropped.
+		// Drain only when truncation has genuinely occurred.
+		if lb.truncated {
+			_, _ = io.Copy(io.Discard, r)
+			return n, nil
 		}
 	}
 }

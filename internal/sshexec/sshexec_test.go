@@ -1,6 +1,7 @@
 package sshexec
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -316,5 +317,63 @@ func TestLimitedBuffer_NoLimit(t *testing.T) {
 	}
 	if lb.truncated {
 		t.Error("should not be truncated with no limit")
+	}
+}
+
+func TestLimitedBuffer_ReadFrom_ExactLimit(t *testing.T) {
+	// Data is exactly the limit — no truncation should be reported.
+	var lb limitedBuffer
+	lb.limit = 512
+
+	n, err := lb.ReadFrom(bytes.NewReader(make([]byte, 512)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 512 {
+		t.Errorf("expected 512 bytes read, got %d", n)
+	}
+	if lb.Len() != 512 {
+		t.Errorf("expected buffer len 512, got %d", lb.Len())
+	}
+	if lb.truncated {
+		t.Error("false-positive truncation: data is exactly limit, nothing was dropped")
+	}
+}
+
+func TestLimitedBuffer_ReadFrom_OverLimit(t *testing.T) {
+	// Data exceeds the limit — should truncate.
+	var lb limitedBuffer
+	lb.limit = 512
+
+	n, err := lb.ReadFrom(bytes.NewReader(make([]byte, 1024)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lb.Len() != 512 {
+		t.Errorf("expected buffer len 512, got %d", lb.Len())
+	}
+	if !lb.truncated {
+		t.Error("expected truncated when data exceeds limit")
+	}
+	// n reports the original bytes read from the reader (including discarded)
+	if n < 512 {
+		t.Errorf("expected at least 512 bytes accounted, got %d", n)
+	}
+}
+
+func TestLimitedBuffer_ReadFrom_UnderLimit(t *testing.T) {
+	// Data is under the limit — no truncation.
+	var lb limitedBuffer
+	lb.limit = 512
+
+	n, err := lb.ReadFrom(bytes.NewReader(make([]byte, 256)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 256 {
+		t.Errorf("expected 256 bytes read, got %d", n)
+	}
+	if lb.truncated {
+		t.Error("should not be truncated when under limit")
 	}
 }
