@@ -3,7 +3,7 @@ BINDIR  := bin
 GO      := go
 GOFLAGS := -trimpath -ldflags="-s -w"
 
-.PHONY: build install install-go clean test fmt vet all
+.PHONY: build install install-go clean test test-e2e fmt vet all
 
 all: test build
 
@@ -22,6 +22,9 @@ clean:
 
 test:
 	$(GO) test ./... -v -count=1
+
+test-e2e:
+	LILY_E2E=1 $(GO) test ./test/e2e/ -v -count=1 -timeout 20m
 
 fmt:
 	$(GO)fmt -w .

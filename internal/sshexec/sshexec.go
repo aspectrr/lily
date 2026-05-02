@@ -246,6 +246,9 @@ func (e *Executor) resolveChain(host *sshconfig.Host, visited map[string]bool) (
 	}
 
 	proxyNames := splitProxyChain(host.ProxyJump)
+	if len(proxyNames) == 0 {
+		return nil, fmt.Errorf("invalid ProxyJump value for host %s", host.Host)
+	}
 
 	// Comma-separated proxies: use each directly without recursive resolution
 	if len(proxyNames) > 1 {
@@ -317,7 +320,9 @@ func buildSSHConfig(host *sshconfig.Host) (*ssh.ClientConfig, error) {
 
 func closeClients(clients []*ssh.Client) {
 	for i := len(clients) - 1; i >= 0; i-- {
-		clients[i].Close()
+		if err := clients[i].Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: closing proxy client: %v\n", err)
+		}
 	}
 }
 
@@ -383,6 +388,7 @@ func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 }
 
 // limitedBuffer is a bytes.Buffer that stops accepting writes after reaching limit.
+// A mutex is needed because the SSH library may call Write from concurrent goroutines.
 type limitedBuffer struct {
 	bytes.Buffer
 	limit     int64

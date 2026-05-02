@@ -252,6 +252,21 @@ func TestResolveProxyChain_MissingProxy(t *testing.T) {
 	}
 }
 
+func TestResolveProxyChain_EmptyProxyJump(t *testing.T) {
+	hosts := []sshconfig.Host{
+		{Host: "web1", Names: []string{"web1"}, HostName: "10.0.0.5", ProxyJump: ","},
+	}
+	exec := NewExecutor(hosts, 30*time.Second, 0)
+
+	_, err := exec.resolveProxyChain(&hosts[0])
+	if err == nil {
+		t.Fatal("expected error for empty ProxyJump")
+	}
+	if !strings.Contains(err.Error(), "invalid ProxyJump") {
+		t.Errorf("expected invalid ProxyJump error, got: %s", err)
+	}
+}
+
 func TestSplitProxyChain(t *testing.T) {
 	tests := []struct {
 		input    string
