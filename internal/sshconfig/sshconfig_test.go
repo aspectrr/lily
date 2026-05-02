@@ -156,6 +156,61 @@ Host web1
 	}
 }
 
+func TestParseProxyJump(t *testing.T) {
+	content := `
+Host bastion
+    HostName 1.2.3.4
+    User admin
+
+Host web1
+    HostName 10.0.0.5
+    User deploy
+    ProxyJump bastion
+
+Host db1
+    HostName 10.0.0.6
+    ProxyJump jump1,jump2
+
+Host gateway
+    HostName 203.0.113.1
+    ProxyCommand ssh -W %h:%p firewall
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	hosts, err := Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	web1 := LookupHost(hosts, "web1")
+	if web1 == nil {
+		t.Fatal("expected web1")
+	}
+	if web1.ProxyJump != "bastion" {
+		t.Errorf("expected ProxyJump bastion, got %q", web1.ProxyJump)
+	}
+
+	db1 := LookupHost(hosts, "db1")
+	if db1 == nil {
+		t.Fatal("expected db1")
+	}
+	if db1.ProxyJump != "jump1,jump2" {
+		t.Errorf("expected ProxyJump jump1,jump2, got %q", db1.ProxyJump)
+	}
+
+	gateway := LookupHost(hosts, "gateway")
+	if gateway == nil {
+		t.Fatal("expected gateway")
+	}
+	if gateway.ProxyCommand != "ssh -W %h:%p firewall" {
+		t.Errorf("expected ProxyCommand, got %q", gateway.ProxyCommand)
+	}
+}
+
 func TestParseMultipleAliases(t *testing.T) {
 	content := `
 Host web web1 production

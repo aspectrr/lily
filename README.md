@@ -220,6 +220,98 @@ Lily uses **Trust On First Use (TOFU)** for SSH host key verification:
 
 If `~/.ssh/known_hosts` doesn't exist, Lily creates it automatically. No manual setup required.
 
+### ProxyJump (bastion / jump host)
+
+Lily supports SSH ProxyJump for reaching hosts behind a bastion or jump server. This is the standard scenario where your local machine connects to a jump host, and from there tunnels to internal hosts that aren't directly reachable.
+
+Configure it in `~/.ssh/config`:
+
+```
+Host bastion
+    HostName 203.0.113.1
+    User admin
+
+Host web1
+    HostName 10.0.0.5
+    User deploy
+    ProxyJump bastion
+
+Host db1
+    HostName 10.0.0.6
+    ProxyJump bastion
+```
+
+Now `lily run web1 "systemctl status nginx"` automatically tunnels through bastion. The AI agent doesn't need to know about the proxy — it just targets `web1` as usual.
+
+#### How it works
+
+1. Lily reads `ProxyJump` from your SSH config
+2. Dials the jump host directly
+3. Opens an SSH tunnel through the jump host to the target
+4. Runs the validated command on the target
+5. All intermediate connections are kept alive and cleaned up together
+
+#### Multi-hop chains
+
+ProxyJump supports chaining through multiple hosts:
+
+```
+Host gateway
+    HostName 203.0.113.1
+
+Host bastion
+    HostName 10.0.0.1
+    ProxyJump gateway
+
+Host web1
+    HostName 192.168.1.5
+    ProxyJump bastion
+```
+
+This creates a chain: **local → gateway → bastion → web1**. Lily resolves the chain recursively and detects loops.
+
+You can also use comma-separated proxies (no recursive resolution):
+
+```
+Host web1
+    HostName 10.0.0.5
+    ProxyJump jump1,jump2
+```
+
+#### Authentication for proxy hops
+
+Each hop in the chain uses its own SSH config (user, identity file, port). The SSH agent and default keys are tried for every hop, so if your agent has keys for both the bastion and the target, everything works automatically.
+
+#### ProxyCommand is not supported
+
+Lily only supports `ProxyJump` (SSH-native tunneling). `ProxyCommand` is **not supported** because it executes arbitrary local commands, which is a security risk. If your SSH config uses `ProxyCommand`, convert it to `ProxyJump`:
+
+```diff
+- ProxyCommand ssh -W %h:%p bastion
++ ProxyJump bastion
+```
+
+If a host has `ProxyCommand` but no `ProxyJump`, Lily prints a warning and attempts a direct connection (which will likely fail if the host truly requires a proxy).
+
+#### Proxy display
+
+The `list_hosts` tool and `lily hosts` command show which hosts use a proxy:
+
+```
+→ list_hosts()
+← Found 3 host(s) in SSH config:
+    bastion                   203.0.113.1 (user: admin)
+    web1                      10.0.0.5 (user: deploy) [via bastion]
+    db1                       10.0.0.6 [via bastion]
+```
+
+`check_host` also indicates the proxy:
+
+```
+→ check_host(host="web1")
+← Host "web1" is reachable (via bastion).
+```
+
 ### What runs on the remote
 
 The validated command is sent over SSH and executed by the remote host's default shell. No agent, daemon, or restricted shell is installed on the remote — all safety enforcement happens client-side in the compiled binary.
@@ -567,10 +659,10 @@ lily/
 │   │   ├── validate.go         #   7-layer validation pipeline
 │   │   └── validate_test.go    #   75+ attack vector regression tests
 │   ├── sshconfig/              # SSH config parser
-│   │   ├── sshconfig.go
+│   │   ├── sshconfig.go        #   Host, ProxyJump, ProxyCommand parsing
 │   │   └── sshconfig_test.go
-│   └── sshexec/                # SSH execution (agent/key auth)
-│       ├── sshexec.go          #   Executor with output caps
+│   └── sshexec/                # SSH execution (direct + ProxyJump)
+│       ├── sshexec.go          #   Executor with output caps, proxy chains
 │       └── sshexec_test.go
 ├── lily.yaml                   # Example config
 ├── SECURITY.md                 # Full security model & sandboxing guide
