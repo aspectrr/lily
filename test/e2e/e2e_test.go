@@ -27,11 +27,14 @@ const (
 	instanceBastion  = "lily-e2e-bastion"
 	instanceTarget   = "lily-e2e-target"
 	vmStartupTimeout = 5 * time.Minute
+
+	// Fixed SSH port for the target VM so the bastion can reach it
+	// via host.lima.internal.<targetPort>.
+	targetSSHPort = 22220
 )
 
-// limaAlpineYAML is a minimal Lima config using vz (Apple hypervisor).
-// Falls back to qemu on x86_64 macOS or non-macOS.
-const limaAlpineYAML = `
+// limaBaseYAML contains the shared parts of the Lima config.
+const limaBaseYAML = `
 vmType: vz
 arch: default
 images:
@@ -45,8 +48,6 @@ cpus: 2
 memory: 512MiB
 disk: 5GiB
 mounts: []
-networks:
-- lima:shared
 containerd:
   system: false
   user: false
@@ -56,6 +57,17 @@ provision:
     #!/bin/sh
     set -eux
     apk add --no-cache util-linux procps-ng coreutils findutils diffutils file iproute2-ss
+`
+
+// limaTargetYAML is the target VM with a fixed SSH port.
+const limaTargetYAML = limaBaseYAML + `
+ssh:
+  localPort: %d
+  loadDotSSHPubKeys: true
+`
+
+// limaBastionYAML is the bastion VM with a dynamic SSH port.
+const limaBastionYAML = limaBaseYAML + `
 ssh:
   localPort: 0
   loadDotSSHPubKeys: true
@@ -106,11 +118,15 @@ func createTestEnv() (*testEnv, error) {
 		validator: readonly.DefaultValidator(),
 	}
 
+	// Remove stale known_hosts entries for our test ports to avoid
+	// host key mismatch errors from previous test runs.
+	cleanKnownHosts()
+
 	// Start both VMs.
-	if err := te.startVM(instanceTarget); err != nil {
+	if err := te.startVM(instanceTarget, fmt.Sprintf(limaTargetYAML, targetSSHPort)); err != nil {
 		return nil, fmt.Errorf("start target VM: %w", err)
 	}
-	if err := te.startVM(instanceBastion); err != nil {
+	if err := te.startVM(instanceBastion, limaBastionYAML); err != nil {
 		return nil, fmt.Errorf("start bastion VM: %w", err)
 	}
 
@@ -122,6 +138,14 @@ func createTestEnv() (*testEnv, error) {
 
 	te.exec = sshexec.NewExecutor(te.hosts, 30*time.Second, sshexec.DefaultMaxOutputBytes)
 
+	// Wait for SSH to be actually ready on both VMs.
+	if err := te.waitForSSH("lily-target-direct"); err != nil {
+		return nil, fmt.Errorf("target SSH not ready: %w", err)
+	}
+	if err := te.waitForSSH("lily-bastion"); err != nil {
+		return nil, fmt.Errorf("bastion SSH not ready: %w", err)
+	}
+
 	// Seed test data.
 	if err := te.seedTestData(); err != nil {
 		return nil, fmt.Errorf("seed test data: %w", err)
@@ -132,18 +156,15 @@ func createTestEnv() (*testEnv, error) {
 
 // startVM ensures a Lima VM instance is running. If the instance already exists,
 // it starts it. If not, it creates and starts it.
-func (te *testEnv) startVM(name string) error {
+func (te *testEnv) startVM(name, yamlConfig string) error {
 	// Check if instance already exists.
 	listCmd := limaCmd("list", "--format", "{{.Name}}")
 	output, err := listCmd.Output()
 	if err == nil && strings.Contains(string(output), name) {
 		// Instance exists — make sure it's running.
-		startCmd := limaCmd("start", "--tty=false", name)
-		startCmd.Stdout = os.Stderr
-		startCmd.Stderr = os.Stderr
 		ctx, cancel := context.WithTimeout(context.Background(), vmStartupTimeout)
 		defer cancel()
-		runCmd := exec.CommandContext(ctx, startCmd.Args[0], startCmd.Args[1:]...)
+		runCmd := exec.CommandContext(ctx, "limactl", "start", "--tty=false", name)
 		runCmd.Stdout = os.Stderr
 		runCmd.Stderr = os.Stderr
 		if err := runCmd.Run(); err != nil {
@@ -153,16 +174,14 @@ func (te *testEnv) startVM(name string) error {
 	}
 
 	// Instance doesn't exist — create it.
-	// First clean up any stale state.
 	_ = limaCmd("stop", name).Run()
 	_ = limaCmd("delete", name).Run()
 
 	configPath := filepath.Join(te.tmpDir, name+".yaml")
-	if err := os.WriteFile(configPath, []byte(limaAlpineYAML), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(yamlConfig), 0644); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 
-	// Create.
 	createCmd := limaCmd("create", "--name", name, "--tty=false", configPath)
 	createCmd.Stdout = os.Stderr
 	createCmd.Stderr = os.Stderr
@@ -170,7 +189,6 @@ func (te *testEnv) startVM(name string) error {
 		return fmt.Errorf("limactl create %s: %w", name, err)
 	}
 
-	// Start.
 	ctx, cancel := context.WithTimeout(context.Background(), vmStartupTimeout)
 	defer cancel()
 	startCmd := exec.CommandContext(ctx, "limactl", "start", "--tty=false", name)
@@ -193,14 +211,6 @@ func (te *testEnv) buildHosts() ([]sshconfig.Host, error) {
 		return nil, fmt.Errorf("parse target SSH config: %w", err)
 	}
 
-	// Discover the target's IP on the lima:shared network (192.168.105.0/24).
-	// This is needed because the bastion VM cannot reach 127.0.0.1:<target_port>
-	// from inside its own VM — it needs the shared-network IP instead.
-	targetSharedIP, err := getLimaSharedIP(instanceTarget)
-	if err != nil {
-		return nil, fmt.Errorf("discover target shared IP: %w", err)
-	}
-
 	return []sshconfig.Host{
 		{
 			// Direct connection to bastion via host-side forwarded port.
@@ -209,12 +219,15 @@ func (te *testEnv) buildHosts() ([]sshconfig.Host, error) {
 			Port: bastion.Port, IdentityFile: bastion.IdentityFile,
 		},
 		{
-			// Proxied connection: host -> bastion -> target (via shared network).
-			// Uses the target's shared-network IP so the bastion can reach it.
+			// Proxied connection: host -> bastion -> target.
+			// The bastion reaches the target via host.lima.internal (the host
+			// gateway) on the target's fixed SSH port, which Lima forwards
+			// to the target VM's port 22.
 			Host: "lily-target", Names: []string{"lily-target"},
-			HostName: targetSharedIP, User: target.User,
-			Port: "22", IdentityFile: target.IdentityFile,
-			ProxyJump: "lily-bastion",
+			HostName: "host.lima.internal", User: target.User,
+			Port:         fmt.Sprintf("%d", targetSSHPort),
+			IdentityFile: target.IdentityFile,
+			ProxyJump:    "lily-bastion",
 		},
 		{
 			// Direct connection to target via host-side forwarded port.
@@ -223,31 +236,6 @@ func (te *testEnv) buildHosts() ([]sshconfig.Host, error) {
 			Port: target.Port, IdentityFile: target.IdentityFile,
 		},
 	}, nil
-}
-
-// getLimaSharedIP returns the IP address of a Lima instance on the shared network.
-func getLimaSharedIP(instanceName string) (string, error) {
-	// limactl shell runs a command inside the VM.
-	cmd := limaCmd("shell", instanceName, "ip", "-4", "addr", "show", "dev", "eth0")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("get IP from %s: %w", instanceName, err)
-	}
-
-	// Parse output like: inet 192.168.105.42/24 brd 192.168.105.255 scope global eth0
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "inet ") && strings.Contains(line, "192.168.") {
-			parts := strings.Fields(line)
-			for _, p := range parts {
-				if strings.HasPrefix(p, "192.168.") {
-					ip := strings.SplitN(p, "/", 2)[0]
-					return ip, nil
-				}
-			}
-		}
-	}
-	return "", fmt.Errorf("no 192.168.x.x address found for %s", instanceName)
 }
 
 func parseLimaSSHConfig(instanceName string) (sshconfig.Host, error) {
@@ -265,6 +253,46 @@ func parseLimaSSHConfig(instanceName string) (sshconfig.Host, error) {
 		return hosts[0], nil
 	}
 	return sshconfig.Host{}, fmt.Errorf("no hosts in %s", configPath)
+}
+
+// cleanKnownHosts removes entries for our test ports from ~/.ssh/known_hosts.
+func cleanKnownHosts() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
+	data, err := os.ReadFile(knownHosts)
+	if err != nil {
+		return
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, fmt.Sprintf("%d", targetSSHPort)) ||
+			strings.Contains(line, "host.lima.internal") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	os.WriteFile(knownHosts, []byte(strings.Join(lines, "\n")), 0600)
+}
+
+// waitForSSH retries SSH connections until the host responds, with a 60s timeout.
+func (te *testEnv) waitForSSH(host string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for {
+		result, err := te.exec.Run(ctx, host, "echo ready")
+		if err == nil && strings.TrimSpace(result.Stdout) == "ready" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("SSH to %s not ready after 60s: last error: %v", host, err)
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func (te *testEnv) seedTestData() error {
@@ -565,6 +593,10 @@ func TestOutputTruncation(t *testing.T) {
 	te := getTestEnv(t)
 	ctx := context.Background()
 
+	// First check the file size.
+	sizeResult := runOK(t, ctx, te.exec, "lily-target-direct", "wc -c /tmp/lily-test/large.txt")
+	t.Logf("large.txt size: %s", strings.TrimSpace(sizeResult.Stdout))
+
 	smallLimit := int64(512)
 	exec := sshexec.NewExecutor(te.hosts, 30*time.Second, smallLimit)
 
@@ -578,7 +610,7 @@ func TestOutputTruncation(t *testing.T) {
 	if len(result.Stdout) > int(smallLimit) {
 		t.Errorf("output %d bytes exceeds limit %d", len(result.Stdout), smallLimit)
 	}
-	t.Logf("Truncated=%v, size=%d", result.Truncated, len(result.Stdout))
+	t.Logf("Truncated=%v, stdout=%d bytes, stderr=%d bytes", result.Truncated, len(result.Stdout), len(result.Stderr))
 }
 
 // ─── Rate limiting ──────────────────────────────────────────────────────
