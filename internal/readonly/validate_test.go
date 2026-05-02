@@ -577,3 +577,28 @@ func TestValidateCommand_SedWrite(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateCommand_SedWriteFalsePositive(t *testing.T) {
+	// Filenames starting with 'w' must not trigger the bare-w check.
+	for _, cmd := range []string{
+		`sed 's/foo/bar/g' webpack.config.js`,
+		`sed 's/foo/bar/g' wsdl.xml`,
+		`sed 's/foo/bar/g' words.txt`,
+		`sed 's/foo/bar/g' widget.html`,
+	} {
+		if err := ValidateCommand(cmd); err != nil {
+			t.Errorf("expected %q to be allowed, got: %v", cmd, err)
+		}
+	}
+
+	// Actual bare-w writes must still be blocked.
+	for _, cmd := range []string{
+		`sed 'wfoo' file`,
+		`sed 'w.ssh/authorized_keys' /etc/passwd`,
+		`sed 'wout.txt' file`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked", cmd)
+		}
+	}
+}
