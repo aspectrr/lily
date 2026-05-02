@@ -4,11 +4,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Config represents the user-configurable allowlist extensions.
+const (
+	// DefaultRateLimit is the minimum interval between commands.
+	DefaultRateLimit = 1 * time.Second
+
+	// DefaultMaxOutputBytes is the maximum output captured per command.
+	DefaultMaxOutputBytes = 1024 * 1024 // 1 MB
+)
+
+// Config represents the user-configurable settings for Lily.
 // It can only ADD to the base allowlist — hardcoded restrictions
 // (blocking rm, sudo, bash, python, etc.) cannot be overridden.
 type Config struct {
@@ -21,22 +30,56 @@ type Config struct {
 
 	// ExtraBlockedFlags adds flags that are blocked for specific commands.
 	ExtraBlockedFlags map[string][]string `yaml:"extra_blocked_flags"`
+
+	// RateLimit is the minimum duration between command executions.
+	// Defaults to "1s". Set to "500ms" for faster, or "5s" for stricter.
+	RateLimit string `yaml:"rate_limit"`
+
+	// MaxOutputBytes caps the total output (stdout + stderr) per command.
+	// Defaults to 1048576 (1 MB). Minimum is 1024 (1 KB).
+	MaxOutputBytes int `yaml:"max_output_bytes"`
 }
 
-// DefaultConfigPath returns the default path for the allowlist config file.
+// GetRateLimit parses the rate limit string into a duration.
+func (c *Config) GetRateLimit() time.Duration {
+	if c.RateLimit == "" {
+		return DefaultRateLimit
+	}
+	d, err := time.ParseDuration(c.RateLimit)
+	if err != nil {
+		return DefaultRateLimit
+	}
+	return d
+}
+
+// GetMaxOutputBytes returns the configured max output size with a minimum of 1KB.
+func (c *Config) GetMaxOutputBytes() int64 {
+	if c.MaxOutputBytes <= 0 {
+		return DefaultMaxOutputBytes
+	}
+	min := int64(1024) // 1 KB minimum
+	val := int64(c.MaxOutputBytes)
+	if val < min {
+		return min
+	}
+	return val
+}
+
+// DefaultConfigPath returns the default path for the lily config file.
 func DefaultConfigPath() string {
 	if configDir := os.Getenv("XDG_CONFIG_HOME"); configDir != "" {
-		return filepath.Join(configDir, "lily", "allowlist.yaml")
+		return filepath.Join(configDir, "lily", "lily.yaml")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".config", "lily", "allowlist.yaml")
+		return filepath.Join(".config", "lily", "lily.yaml")
 	}
-	return filepath.Join(home, ".config", "lily", "allowlist.yaml")
+	return filepath.Join(home, ".config", "lily", "lily.yaml")
 }
 
-// Load reads and parses the allowlist config from the given path.
+// Load reads and parses the config from the given path.
 // If the file doesn't exist, returns an empty config (no error).
+// Falls back to the legacy allowlist.yaml path if lily.yaml doesn't exist.
 func Load(path string) (*Config, error) {
 	if path == "" {
 		path = DefaultConfigPath()
@@ -45,11 +88,22 @@ func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// Try legacy allowlist.yaml path
+			if path == DefaultConfigPath() {
+				legacyPath := legacyConfigPath()
+				if legacyData, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
+					return parseConfig(legacyData)
+				}
+			}
 			return &Config{}, nil
 		}
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
+	return parseConfig(data)
+}
+
+func parseConfig(data []byte) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -64,21 +118,18 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the config for obvious errors.
 func (c *Config) Validate() error {
-	// Validate extra subcommand restrictions reference extra commands
-	// (this is just a warning-level check, not enforced strictly)
-	for cmd := range c.ExtraSubcommandRestrictions {
-		found := false
-		for _, extra := range c.ExtraCommands {
-			if extra == cmd {
-				found = true
-				break
-			}
-		}
-		if !found {
-			// Still allow it — might be restricting a built-in command
-			_ = cmd
+	// Validate rate limit format
+	if c.RateLimit != "" {
+		if _, err := time.ParseDuration(c.RateLimit); err != nil {
+			return fmt.Errorf("invalid rate_limit %q: %w", c.RateLimit, err)
 		}
 	}
+
+	// Validate max output bytes
+	if c.MaxOutputBytes < 0 {
+		return fmt.Errorf("max_output_bytes must be non-negative, got %d", c.MaxOutputBytes)
+	}
+
 	return nil
 }
 
@@ -111,4 +162,16 @@ func EnsureConfigDir() error {
 	path := DefaultConfigPath()
 	dir := filepath.Dir(path)
 	return os.MkdirAll(dir, 0755)
+}
+
+// legacyConfigPath returns the pre-v0.2 config path for migration.
+func legacyConfigPath() string {
+	if configDir := os.Getenv("XDG_CONFIG_HOME"); configDir != "" {
+		return filepath.Join(configDir, "lily", "allowlist.yaml")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".config", "lily", "allowlist.yaml")
+	}
+	return filepath.Join(home, ".config", "lily", "allowlist.yaml")
 }

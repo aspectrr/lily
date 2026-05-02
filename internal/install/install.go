@@ -11,15 +11,15 @@ import (
 
 // Target represents an agent that can have lily installed.
 type Target struct {
-	Name        string
-	ConfigPath  string // Absolute path to the agent's MCP config file
+	Name         string
+	ConfigPath   string // Absolute path to the agent's MCP config file
 	ConfigFormat string // "claude" or "mcp-json"
 }
 
 // KnownTargets returns all known agent targets on this system.
 func KnownTargets() []Target {
-	home, _ := os.UserHomeDir()
-	if home == "" {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
 		return nil
 	}
 
@@ -107,9 +107,9 @@ func DetectedTargets() []Target {
 
 // InstallResult holds the outcome of installing lily.
 type InstallResult struct {
-	AgentConfigWritten   bool
-	AllowlistDeployed    bool
-	AllowlistPath        string
+	AgentConfigWritten bool
+	AllowlistDeployed  bool
+	AllowlistPath      string
 }
 
 // Install adds lily to the given target's MCP configuration and
@@ -276,7 +276,10 @@ func dirExists(path string) bool {
 // FindBinary attempts to locate the lily binary.
 func FindBinary() string {
 	// Check common locations
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "" // fall back to non-home candidates
+	}
 	candidates := []string{
 		filepath.Join(".", "bin", "lily"),
 		filepath.Join(".", "lily"),
@@ -328,22 +331,28 @@ func LookupTarget(name string) *Target {
 	return nil
 }
 
-// AllowlistConfigPath returns the path where the allowlist YAML should live.
-func AllowlistConfigPath() string {
+// ConfigFilePath returns the path where the lily.yaml config should live.
+func ConfigFilePath() string {
 	if configDir := os.Getenv("XDG_CONFIG_HOME"); configDir != "" {
-		return filepath.Join(configDir, "lily", "allowlist.yaml")
+		return filepath.Join(configDir, "lily", "lily.yaml")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".config", "lily", "allowlist.yaml")
+		return filepath.Join(".config", "lily", "lily.yaml")
 	}
-	return filepath.Join(home, ".config", "lily", "allowlist.yaml")
+	return filepath.Join(home, ".config", "lily", "lily.yaml")
 }
 
-// DeployDefaultAllowlist creates the default allowlist config file
+// AllowlistConfigPath returns the config file path (alias for ConfigFilePath).
+// Deprecated: use ConfigFilePath instead.
+func AllowlistConfigPath() string {
+	return ConfigFilePath()
+}
+
+// DeployDefaultConfig creates the default lily.yaml config file
 // if one doesn't already exist.
-func DeployDefaultAllowlist() error {
-	path := AllowlistConfigPath()
+func DeployDefaultConfig() error {
+	path := ConfigFilePath()
 	if fileExists(path) {
 		return nil
 	}
@@ -353,16 +362,36 @@ func DeployDefaultAllowlist() error {
 		return err
 	}
 
-	return os.WriteFile(path, []byte(defaultAllowlist), 0644)
+	return os.WriteFile(path, []byte(defaultConfig), 0644)
 }
 
-const defaultAllowlist = `# Lily MCP Allowlist Configuration
+// DeployDefaultAllowlist is an alias for DeployDefaultConfig.
+// Deprecated: use DeployDefaultConfig instead.
+func DeployDefaultAllowlist() error {
+	return DeployDefaultConfig()
+}
+
+const defaultConfig = `# Lily MCP Configuration
+#
+# Location: ~/.config/lily/lily.yaml (run "lily config-path" to find it)
 #
 # This file customizes which commands are available to the MCP server.
 # It can only ADD commands to the base allowlist — the hardcoded safety
 # restrictions (blocking rm, sudo, bash, python, etc.) cannot be overridden.
 #
 # After editing, validate with: lily validate-config
+
+# ── Execution Limits ──────────────────────────────────────────────
+
+# Minimum interval between commands. Prevents agents from flooding hosts.
+# Default: "1s" (1 command per second). Set to "500ms" for faster, "5s" for stricter.
+rate_limit: "1s"
+
+# Maximum output (stdout + stderr) captured per command, in bytes.
+# Default: 1048576 (1 MB). Minimum: 1024 (1 KB).
+max_output_bytes: 1048576
+
+# ── Command Allowlist ────────────────────────────────────────────
 
 # Extra commands to allow beyond the built-in allowlist.
 # These are still subject to metacharacter checks (no $(), backticks, >, etc.)

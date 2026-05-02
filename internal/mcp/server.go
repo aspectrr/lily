@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aspectrr/lily/internal/allowlist"
@@ -15,29 +16,54 @@ import (
 )
 
 const serverName = "lily"
-const serverVersion = "0.1.0"
+const serverVersion = "0.2.0"
+
+// rateLimiter enforces a minimum interval between command executions.
+type rateLimiter struct {
+	mu          sync.Mutex
+	lastRun     time.Time
+	minInterval time.Duration
+}
+
+func newRateLimiter(interval time.Duration) *rateLimiter {
+	return &rateLimiter{minInterval: interval}
+}
+
+func (r *rateLimiter) wait() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	elapsed := time.Since(r.lastRun)
+	if elapsed < r.minInterval {
+		time.Sleep(r.minInterval - elapsed)
+	}
+	r.lastRun = time.Now()
+}
 
 // NewServer creates a configured MCP server with all tools registered.
 func NewServer(hosts []sshconfig.Host, timeout time.Duration, cfg *allowlist.Config) *mcpserver.MCPServer {
 	s := mcpserver.NewMCPServer(serverName, serverVersion)
 
-	exec := sshexec.NewExecutor(hosts, timeout)
+	maxOutput := cfg.GetMaxOutputBytes()
+	exec := sshexec.NewExecutor(hosts, timeout, maxOutput)
 	validator := readonly.NewValidator(
 		cfg.ExtraCommands,
 		cfg.SubcommandRestrictions(),
 		cfg.BlockedFlags(),
 	)
 
-	s.AddTool(runCommandTool(hosts, exec, validator))
+	limiter := newRateLimiter(cfg.GetRateLimit())
+
+	s.AddTool(runCommandTool(hosts, exec, validator, limiter))
 	s.AddTool(listHostsTool(hosts))
 	s.AddTool(validateCommandTool(validator))
-	s.AddTool(checkHostTool(hosts, exec))
+	s.AddTool(checkHostTool(hosts, exec, limiter))
 	s.AddTool(listAllowedCommandsTool(validator))
 
 	return s
 }
 
-func runCommandTool(hosts []sshconfig.Host, exec *sshexec.Executor, v *readonly.Validator) (mcp.Tool, mcpserver.ToolHandlerFunc) {
+func runCommandTool(hosts []sshconfig.Host, exec *sshexec.Executor, v *readonly.Validator, limiter *rateLimiter) (mcp.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcp.NewTool("run_command",
 		mcp.WithDescription("Execute a read-only command on a remote host via SSH. The command is validated against a strict allowlist before execution. Only read-only operations are permitted: file inspection (cat, ls, find, head, tail), process viewing (ps, systemctl status, journalctl), network diagnostics (ss, dig, curl GET), system info (uname, df, free), and text processing (grep, awk, sed). No command substitution, output redirection, or destructive operations. Use list_hosts to discover available hosts."),
 		mcp.WithString("host",
@@ -73,7 +99,17 @@ func runCommandTool(hosts []sshconfig.Host, exec *sshexec.Executor, v *readonly.
 			return errorResult(fmt.Sprintf("command blocked: %s", err.Error())), nil
 		}
 
-		result, err := exec.Run(ctx, hostName, command)
+		// Sanitize the command: reconstruct with safe quoting so the remote
+		// shell cannot reinterpret any special characters.
+		safeCommand, err := v.SanitizeCommand(command)
+		if err != nil {
+			return errorResult(fmt.Sprintf("command sanitization failed: %s", err.Error())), nil
+		}
+
+		// Enforce rate limit
+		limiter.wait()
+
+		result, err := exec.Run(ctx, hostName, safeCommand)
 		if err != nil {
 			return errorResult(fmt.Sprintf("execution failed: %s", err.Error())), nil
 		}
@@ -168,7 +204,7 @@ func validateCommandTool(v *readonly.Validator) (mcp.Tool, mcpserver.ToolHandler
 	return tool, handler
 }
 
-func checkHostTool(hosts []sshconfig.Host, exec *sshexec.Executor) (mcp.Tool, mcpserver.ToolHandlerFunc) {
+func checkHostTool(hosts []sshconfig.Host, exec *sshexec.Executor, limiter *rateLimiter) (mcp.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcp.NewTool("check_host",
 		mcp.WithDescription("Test SSH connectivity to a host by running a simple echo command. Use this to verify a host is reachable before running diagnostic commands."),
 		mcp.WithString("host",
@@ -190,6 +226,9 @@ func checkHostTool(hosts []sshconfig.Host, exec *sshexec.Executor) (mcp.Tool, mc
 		if sshconfig.LookupHost(hosts, hostName) == nil {
 			return errorResult(fmt.Sprintf("host %q not found in SSH config", hostName)), nil
 		}
+
+		// Enforce rate limit
+		limiter.wait()
 
 		result, err := exec.Run(ctx, hostName, "echo ok")
 		if err != nil {

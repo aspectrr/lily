@@ -4,10 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoad_Nonexistent(t *testing.T) {
-	cfg, err := Load("/nonexistent/path/allowlist.yaml")
+	cfg, err := Load("/nonexistent/path/lily.yaml")
 	if err != nil {
 		t.Fatalf("expected no error for missing file, got: %v", err)
 	}
@@ -35,9 +36,12 @@ extra_blocked_flags:
   docker:
     - exec
     - run
+
+rate_limit: "2s"
+max_output_bytes: 2097152
 `
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "allowlist.yaml")
+	path := filepath.Join(tmpDir, "lily.yaml")
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -67,11 +71,18 @@ extra_blocked_flags:
 	if flags, ok := cfg.ExtraBlockedFlags["docker"]; !ok || len(flags) != 2 {
 		t.Errorf("expected docker with 2 blocked flags, got %v", cfg.ExtraBlockedFlags["docker"])
 	}
+
+	if cfg.RateLimit != "2s" {
+		t.Errorf("expected rate_limit 2s, got %q", cfg.RateLimit)
+	}
+	if cfg.MaxOutputBytes != 2097152 {
+		t.Errorf("expected max_output_bytes 2097152, got %d", cfg.MaxOutputBytes)
+	}
 }
 
 func TestLoad_Empty(t *testing.T) {
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "allowlist.yaml")
+	path := filepath.Join(tmpDir, "lily.yaml")
 	if err := os.WriteFile(path, []byte(""), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +98,7 @@ func TestLoad_Empty(t *testing.T) {
 
 func TestLoad_InvalidYAML(t *testing.T) {
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "allowlist.yaml")
+	path := filepath.Join(tmpDir, "lily.yaml")
 	if err := os.WriteFile(path, []byte("{{invalid yaml"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -98,11 +109,97 @@ func TestLoad_InvalidYAML(t *testing.T) {
 	}
 }
 
+func TestLoad_LegacyAllowlistFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create legacy allowlist.yaml but no lily.yaml
+	legacyPath := filepath.Join(tmpDir, "allowlist.yaml")
+	content := `
+extra_commands:
+  - docker
+`
+	if err := os.WriteFile(legacyPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load from a path that doesn't exist — should not trigger legacy fallback
+	// (legacy fallback only works with the default config path)
+	// This test verifies the Load function handles missing files gracefully.
+	cfg, err := Load(filepath.Join(tmpDir, "lily.yaml"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.ExtraCommands) != 0 {
+		t.Error("expected empty config when lily.yaml is missing and path is explicit")
+	}
+}
+
+func TestGetRateLimit(t *testing.T) {
+	tests := []struct {
+		config   string
+		expected time.Duration
+	}{
+		{"", DefaultRateLimit},
+		{"500ms", 500 * time.Millisecond},
+		{"2s", 2 * time.Second},
+		{"1m", 1 * time.Minute},
+	}
+
+	for _, tc := range tests {
+		cfg := &Config{RateLimit: tc.config}
+		got := cfg.GetRateLimit()
+		if got != tc.expected {
+			t.Errorf("GetRateLimit(%q) = %v, want %v", tc.config, got, tc.expected)
+		}
+	}
+
+	// Invalid duration should return default
+	cfg := &Config{RateLimit: "not-a-duration"}
+	if got := cfg.GetRateLimit(); got != DefaultRateLimit {
+		t.Errorf("GetRateLimit(invalid) = %v, want %v", got, DefaultRateLimit)
+	}
+}
+
+func TestGetMaxOutputBytes(t *testing.T) {
+	tests := []struct {
+		config   int
+		expected int64
+	}{
+		{0, DefaultMaxOutputBytes},
+		{-1, DefaultMaxOutputBytes},
+		{512, 1024}, // minimum is 1KB
+		{1024, 1024},
+		{5242880, 5242880}, // 5 MB
+	}
+
+	for _, tc := range tests {
+		cfg := &Config{MaxOutputBytes: tc.config}
+		got := cfg.GetMaxOutputBytes()
+		if got != tc.expected {
+			t.Errorf("GetMaxOutputBytes(%d) = %d, want %d", tc.config, got, tc.expected)
+		}
+	}
+}
+
+func TestValidate_InvalidRateLimit(t *testing.T) {
+	cfg := &Config{RateLimit: "not-valid"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for invalid rate_limit")
+	}
+}
+
+func TestValidate_NegativeMaxOutput(t *testing.T) {
+	cfg := &Config{MaxOutputBytes: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for negative max_output_bytes")
+	}
+}
+
 func TestSubcommandRestrictions(t *testing.T) {
 	cfg := &Config{
 		ExtraSubcommandRestrictions: map[string][]string{
-			"docker":   {"ps", "logs", "inspect"},
-			"kubectl":  {"get", "describe"},
+			"docker":  {"ps", "logs", "inspect"},
+			"kubectl": {"get", "describe"},
 		},
 	}
 
@@ -144,17 +241,8 @@ func TestDefaultConfigPath(t *testing.T) {
 	if !filepath.IsAbs(path) {
 		t.Errorf("expected absolute path, got %s", path)
 	}
-}
-
-func TestValidate(t *testing.T) {
-	cfg := &Config{
-		ExtraCommands: []string{"docker"},
-		ExtraSubcommandRestrictions: map[string][]string{
-			"docker": {"ps", "logs"},
-		},
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("unexpected validation error: %v", err)
+	if filepath.Base(path) != "lily.yaml" {
+		t.Errorf("expected filename lily.yaml, got %s", filepath.Base(path))
 	}
 }
 

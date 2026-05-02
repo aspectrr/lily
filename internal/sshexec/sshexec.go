@@ -3,6 +3,7 @@ package sshexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -12,27 +13,43 @@ import (
 	"github.com/aspectrr/lily/internal/sshconfig"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
+)
+
+const (
+	// DefaultMaxOutputBytes is the maximum total output (stdout + stderr) captured.
+	// Beyond this limit, output is truncated to prevent memory exhaustion.
+	DefaultMaxOutputBytes = 1024 * 1024 // 1 MB
 )
 
 // Result holds the output of an SSH command execution.
 type Result struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
+	Stdout    string
+	Stderr    string
+	ExitCode  int
+	Truncated bool // true if output exceeded MaxOutputBytes
 }
 
 // Executor runs commands on remote hosts via SSH.
 type Executor struct {
-	hosts   []sshconfig.Host
-	timeout time.Duration
+	hosts          []sshconfig.Host
+	timeout        time.Duration
+	maxOutputBytes int64
 }
 
-// NewExecutor creates a new SSH executor with the given host entries.
-func NewExecutor(hosts []sshconfig.Host, timeout time.Duration) *Executor {
+// NewExecutor creates a new SSH executor with the given host entries and output limit.
+func NewExecutor(hosts []sshconfig.Host, timeout time.Duration, maxOutputBytes int64) *Executor {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
-	return &Executor{hosts: hosts, timeout: timeout}
+	if maxOutputBytes <= 0 {
+		maxOutputBytes = DefaultMaxOutputBytes
+	}
+	return &Executor{
+		hosts:          hosts,
+		timeout:        timeout,
+		maxOutputBytes: maxOutputBytes,
+	}
 }
 
 // Run executes a command on the specified host and returns the result.
@@ -54,7 +71,10 @@ func (e *Executor) Run(ctx context.Context, hostName string, command string) (*R
 	}
 	defer session.Close()
 
-	var stdout, stderr bytes.Buffer
+	// Use limited writers to cap output size
+	var stdout, stderr limitedBuffer
+	stdout.limit = e.maxOutputBytes
+	stderr.limit = e.maxOutputBytes
 	session.Stdout = &stdout
 	session.Stderr = &stderr
 
@@ -71,8 +91,9 @@ func (e *Executor) Run(ctx context.Context, hostName string, command string) (*R
 		return nil, fmt.Errorf("command timed out after %s", e.timeout)
 	case err := <-done:
 		result := &Result{
-			Stdout: stdout.String(),
-			Stderr: stderr.String(),
+			Stdout:    stdout.String(),
+			Stderr:    stderr.String(),
+			Truncated: stdout.truncated || stderr.truncated,
 		}
 		if err != nil {
 			if exitErr, ok := err.(*ssh.ExitError); ok {
@@ -91,10 +112,15 @@ func (e *Executor) dial(ctx context.Context, host *sshconfig.Host) (*ssh.Client,
 		return nil, err
 	}
 
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("failed to establish host key verification: %w", err)
+	}
+
 	sshConfig := &ssh.ClientConfig{
 		User:            resolveUser(host),
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         10 * time.Second,
 	}
 
@@ -113,6 +139,87 @@ func (e *Executor) dial(ctx context.Context, host *sshconfig.Host) (*ssh.Client,
 	}
 
 	return ssh.NewClient(sshConn, chans, reqs), nil
+}
+
+// getHostKeyCallback returns a HostKeyCallback that implements Trust On First Use
+// (TOFU). On first connection to a host, its key is recorded in ~/.ssh/known_hosts.
+// On subsequent connections, the key is verified against the recorded value.
+// If the key changes, the connection is rejected (potential MITM attack).
+func getHostKeyCallback() (ssh.HostKeyCallback, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	defaultPath := filepath.Join(home, ".ssh", "known_hosts")
+
+	// Ensure the known_hosts file exists (create it if it doesn't)
+	if _, err := os.Stat(defaultPath); os.IsNotExist(err) {
+		if mkErr := os.MkdirAll(filepath.Dir(defaultPath), 0700); mkErr != nil {
+			return nil, fmt.Errorf("cannot create .ssh directory: %w", mkErr)
+		}
+		if writeErr := os.WriteFile(defaultPath, nil, 0600); writeErr != nil {
+			return nil, fmt.Errorf("cannot create known_hosts: %w", writeErr)
+		}
+	}
+
+	cb, err := knownhosts.New(defaultPath)
+	if err != nil {
+		return nil, fmt.Errorf("parse known_hosts: %w", err)
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := cb(hostname, remote, key)
+		if err == nil {
+			// Key matches — known host, all good
+			return nil
+		}
+
+		var keyErr *knownhosts.KeyError
+		if !errors.As(err, &keyErr) {
+			// Some other error (e.g., revoked key) — reject
+			return err
+		}
+
+		if len(keyErr.Want) > 0 {
+			// Key mismatch — known host but different key. Likely MITM.
+			return fmt.Errorf("host key mismatch for %s: possible MITM attack (recorded key differs from server key)", hostname)
+		}
+
+		// Key is unknown (first connection) — trust on first use: record the key.
+		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
+		f, ferr := os.OpenFile(defaultPath, os.O_APPEND|os.O_WRONLY, 0600)
+		if ferr != nil {
+			return fmt.Errorf("cannot record host key for %s: %w", hostname, ferr)
+		}
+		defer f.Close()
+		if _, ferr = fmt.Fprintf(f, "%s\n", line); ferr != nil {
+			return fmt.Errorf("cannot record host key for %s: %w", hostname, ferr)
+		}
+
+		fmt.Fprintf(os.Stderr, "info: first connection to %s — host key recorded in %s\n", hostname, defaultPath)
+		return nil
+	}, nil
+}
+
+// limitedBuffer is a bytes.Buffer that stops accepting writes after reaching limit.
+type limitedBuffer struct {
+	bytes.Buffer
+	limit     int64
+	truncated bool
+}
+
+func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
+	if lb.limit > 0 && int64(lb.Buffer.Len())+int64(len(p)) > lb.limit {
+		// Accept only what fits
+		remaining := lb.limit - int64(lb.Buffer.Len())
+		if remaining > 0 {
+			lb.Buffer.Write(p[:remaining])
+		}
+		lb.truncated = true
+		return len(p), nil // Report full write to avoid session errors
+	}
+	return lb.Buffer.Write(p)
 }
 
 func resolveAddress(host *sshconfig.Host) string {

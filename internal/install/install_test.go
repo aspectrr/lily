@@ -263,17 +263,15 @@ func TestInstallAll(t *testing.T) {
 	}
 }
 
-func TestDeployDefaultAllowlist(t *testing.T) {
-	// Override config path via temp dir
+func TestDeployDefaultConfig(t *testing.T) {
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "lily", "allowlist.yaml")
+	path := filepath.Join(tmpDir, "lily", "lily.yaml")
 
-	// Manually call with the temp path
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(defaultAllowlist), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(defaultConfig), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,20 +281,26 @@ func TestDeployDefaultAllowlist(t *testing.T) {
 	}
 	content := string(data)
 	if !containsStr(content, "extra_commands:") {
-		t.Error("expected allowlist to contain extra_commands section")
+		t.Error("expected config to contain extra_commands section")
 	}
-	if !containsStr(content, "extra_subcommand_restrictions:") {
-		t.Error("expected allowlist to contain extra_subcommand_restrictions section")
+	if !containsStr(content, "rate_limit:") {
+		t.Error("expected config to contain rate_limit section")
+	}
+	if !containsStr(content, "max_output_bytes:") {
+		t.Error("expected config to contain max_output_bytes section")
 	}
 }
 
-func TestAllowlistConfigPath(t *testing.T) {
-	path := AllowlistConfigPath()
+func TestConfigFilePath(t *testing.T) {
+	path := ConfigFilePath()
 	if path == "" {
 		t.Error("expected non-empty path")
 	}
 	if !filepath.IsAbs(path) {
 		t.Errorf("expected absolute path, got %s", path)
+	}
+	if filepath.Base(path) != "lily.yaml" {
+		t.Errorf("expected filename lily.yaml, got %s", filepath.Base(path))
 	}
 }
 
