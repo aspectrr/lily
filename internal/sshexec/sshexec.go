@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aspectrr/lily/internal/sshconfig"
@@ -106,22 +107,48 @@ func (e *Executor) Run(ctx context.Context, hostName string, command string) (*R
 	}
 }
 
-func (e *Executor) dial(ctx context.Context, host *sshconfig.Host) (*ssh.Client, error) {
-	authMethods, err := getAuthMethods(host)
+// sshClient is the interface for SSH client operations used by Executor.
+// Both direct and proxied connections implement this interface.
+type sshClient interface {
+	NewSession() (*ssh.Session, error)
+	Close() error
+}
+
+// proxiedClient wraps an SSH client established through one or more proxy hops.
+// It keeps intermediate proxy clients alive and closes them all on Close().
+type proxiedClient struct {
+	*ssh.Client
+	proxies []*ssh.Client
+}
+
+func (pc *proxiedClient) Close() error {
+	var firstErr error
+	if err := pc.Client.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	for i := len(pc.proxies) - 1; i >= 0; i-- {
+		if err := pc.proxies[i].Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (e *Executor) dial(ctx context.Context, host *sshconfig.Host) (sshClient, error) {
+	if host.ProxyCommand != "" && host.ProxyJump == "" {
+		fmt.Fprintf(os.Stderr, "warning: ProxyCommand is not supported for host %q (use ProxyJump instead)\n", host.Host)
+	}
+
+	if host.ProxyJump == "" {
+		return e.dialDirect(ctx, host)
+	}
+	return e.dialViaProxy(ctx, host)
+}
+
+func (e *Executor) dialDirect(ctx context.Context, host *sshconfig.Host) (*ssh.Client, error) {
+	config, err := buildSSHConfig(host)
 	if err != nil {
 		return nil, err
-	}
-
-	hostKeyCallback, err := getHostKeyCallback()
-	if err != nil {
-		return nil, fmt.Errorf("failed to establish host key verification: %w", err)
-	}
-
-	sshConfig := &ssh.ClientConfig{
-		User:            resolveUser(host),
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
 	}
 
 	address := resolveAddress(host)
@@ -132,13 +159,166 @@ func (e *Executor) dial(ctx context.Context, host *sshconfig.Host) (*ssh.Client,
 		return nil, err
 	}
 
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, address, sshConfig)
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, address, config)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
 
 	return ssh.NewClient(sshConn, chans, reqs), nil
+}
+
+func (e *Executor) dialViaProxy(ctx context.Context, target *sshconfig.Host) (sshClient, error) {
+	chain, err := e.resolveProxyChain(target)
+	if err != nil {
+		return nil, err
+	}
+
+	// First hop: dial directly
+	firstClient, err := e.dialDirect(ctx, chain[0])
+	if err != nil {
+		return nil, fmt.Errorf("proxy %s: %w", chain[0].Host, err)
+	}
+
+	var proxies []*ssh.Client
+	prevClient := firstClient
+
+	for i := 1; i < len(chain); i++ {
+		hop := chain[i]
+		hopAddr := resolveAddress(hop)
+
+		hopConfig, err := buildSSHConfig(hop)
+		if err != nil {
+			prevClient.Close()
+			closeClients(proxies)
+			return nil, fmt.Errorf("config for %s: %w", hop.Host, err)
+		}
+
+		conn, err := prevClient.Dial("tcp", hopAddr)
+		if err != nil {
+			prevClient.Close()
+			closeClients(proxies)
+			return nil, fmt.Errorf("tunnel to %s: %w", hop.Host, err)
+		}
+
+		sshConn, chans, reqs, err := ssh.NewClientConn(conn, hopAddr, hopConfig)
+		if err != nil {
+			conn.Close()
+			prevClient.Close()
+			closeClients(proxies)
+			return nil, fmt.Errorf("SSH to %s via proxy: %w", hop.Host, err)
+		}
+
+		nextClient := ssh.NewClient(sshConn, chans, reqs)
+
+		if i < len(chain)-1 {
+			// Intermediate hop — keep it alive for the tunnel
+			proxies = append(proxies, prevClient)
+			prevClient = nextClient
+		} else {
+			// Final hop (the target)
+			proxies = append(proxies, prevClient)
+			return &proxiedClient{
+				Client:  nextClient,
+				proxies: proxies,
+			}, nil
+		}
+	}
+
+	// Unreachable for valid chains
+	prevClient.Close()
+	closeClients(proxies)
+	return nil, fmt.Errorf("internal error: empty proxy chain")
+}
+
+// resolveProxyChain builds the full connection chain from the target host
+// back through its ProxyJump hops to the first directly reachable host.
+//
+// Example: target.ProxyJump="bastion", bastion.ProxyJump="gateway"
+// → returns [gateway, bastion, target]
+func (e *Executor) resolveProxyChain(target *sshconfig.Host) ([]*sshconfig.Host, error) {
+	return e.resolveChain(target, map[string]bool{})
+}
+
+func (e *Executor) resolveChain(host *sshconfig.Host, visited map[string]bool) ([]*sshconfig.Host, error) {
+	if host.ProxyJump == "" {
+		return []*sshconfig.Host{host}, nil
+	}
+
+	proxyNames := splitProxyChain(host.ProxyJump)
+
+	// Comma-separated proxies: use each directly without recursive resolution
+	if len(proxyNames) > 1 {
+		chain := make([]*sshconfig.Host, 0, len(proxyNames)+1)
+		for _, name := range proxyNames {
+			if visited[name] {
+				return nil, fmt.Errorf("proxy loop detected: %s", name)
+			}
+			proxy := sshconfig.LookupHost(e.hosts, name)
+			if proxy == nil {
+				return nil, fmt.Errorf("proxy host %q not found in SSH config", name)
+			}
+			chain = append(chain, proxy)
+		}
+		chain = append(chain, host)
+		return chain, nil
+	}
+
+	// Single proxy: resolve recursively
+	proxyName := proxyNames[0]
+	if visited[proxyName] {
+		return nil, fmt.Errorf("proxy loop detected: %s", proxyName)
+	}
+	visited[proxyName] = true
+
+	proxy := sshconfig.LookupHost(e.hosts, proxyName)
+	if proxy == nil {
+		return nil, fmt.Errorf("proxy host %q not found in SSH config", proxyName)
+	}
+
+	prefix, err := e.resolveChain(proxy, visited)
+	if err != nil {
+		return nil, err
+	}
+
+	return append(prefix, host), nil
+}
+
+func splitProxyChain(proxyJump string) []string {
+	parts := strings.Split(proxyJump, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func buildSSHConfig(host *sshconfig.Host) (*ssh.ClientConfig, error) {
+	authMethods, err := getAuthMethods(host)
+	if err != nil {
+		return nil, err
+	}
+
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("host key verification: %w", err)
+	}
+
+	return &ssh.ClientConfig{
+		User:            resolveUser(host),
+		Auth:            authMethods,
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         10 * time.Second,
+	}, nil
+}
+
+func closeClients(clients []*ssh.Client) {
+	for i := len(clients) - 1; i >= 0; i-- {
+		clients[i].Close()
+	}
 }
 
 // getHostKeyCallback returns a HostKeyCallback that implements Trust On First Use

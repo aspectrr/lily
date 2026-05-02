@@ -153,6 +153,11 @@ the remote shell performs its own parsing and expansion.
 │    - First connection: host key is recorded in known_hosts      │
 │    - Subsequent: key verified against recorded value            │
 │    - Key mismatch: connection REJECTED (MITM protection)        │
+│  • ProxyJump support: SSH-native tunneling through jump hosts  │
+│    - Each hop gets independent TOFU host key verification       │
+│    - Each hop uses its own auth credentials from SSH config     │
+│    - Loop detection prevents circular proxy chains              │
+│    - ProxyCommand is NOT supported (executes local commands)    │
 │  • Authenticates via SSH agent or key files                     │
 │  • Sends sanitized command via session.Run(command)              │
 │  • Caps output at configurable limit (default 1 MB)             │
@@ -216,8 +221,16 @@ If the agent can write to `~/.ssh/config`, it could:
 - Add a `ProxyCommand` that executes arbitrary code
 - Change `HostName` to route through a malicious host
 - Add `LocalForward`/`RemoteForward` for tunneling
+- Add a `ProxyJump` pointing to a host the agent controls
 
 **Mitigation**: Run the agent in a sandbox with no write access to `~/.ssh/`.
+
+**Note on ProxyCommand**: Lily intentionally does **not** support
+`ProxyCommand` from SSH config. `ProxyCommand` executes arbitrary local
+commands (e.g., `nc %h %p`, `ssh -W %h:%p jump`), which is a security
+risk. Only `ProxyJump` (SSH-native tunneling) is supported. If a host
+has `ProxyCommand` set, Lily prints a warning and attempts a direct
+connection.
 
 ### 2. Config File Manipulation (requires filesystem access)
 
@@ -504,24 +517,25 @@ silently ignored during validation.
 For maximum security when giving AI agents access to remote hosts:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Sandbox (shuru / vmsan)                                     │
-│                                                              │
-│  ┌─────────────┐    ┌──────────┐    ┌──────────────────┐   │
-│  │  AI Agent   │───▶│ Lily CLI │───▶│ SSH to Remote    │   │
-│  │             │    │          │    │ Hosts             │   │
-│  │ No network  │    │ Validates│    │                  │   │
-│  │ No SSH dir  │    │ Sanitizes│    │ Read-only cmds   │   │
-│  │ No curl     │    │ Rate lim │    │ only             │   │
-│  └─────────────┘    └──────────┘    └──────────────────┘   │
-│         │                  │                                 │
-│    read-only         read-only                              │
-│    lily.yaml         ~/.ssh/                                │
-│                                                              │
-│  ❌ No raw SSH, curl, wget, nc                              │
-│  ❌ No write access to ~/.ssh/ or lily.yaml                 │
-│  ❌ No outbound network (except via Lily SSH)               │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Sandbox (shuru / vmsan)                                         │
+│                                                                  │
+│  ┌─────────────┐    ┌──────────┐    ┌────────────────────────┐  │
+│  │  AI Agent   │───▶│ Lily CLI │───▶│ SSH to Remote Hosts    │  │
+│  │             │    │          │    │                        │  │
+│  │ No network  │    │ Validates│    │ ┌────────┐  ┌───────┐ │  │
+│  │ No SSH dir  │    │ Sanitizes│───▶│ │ Jump   │─▶│Target │ │  │
+│  │ No curl     │    │ Rate lim │    │ │ Host   │  │Host   │ │  │
+│  └─────────────┘    └──────────┘    │ └────────┘  └───────┘ │  │
+│         │                  │        │                        │  │
+│    read-only         read-only     │ Read-only cmds only    │  │
+│    lily.yaml         ~/.ssh/       └────────────────────────┘  │
+│                                                                  │
+│  ❌ No raw SSH, curl, wget, nc                                   │
+│  ❌ No write access to ~/.ssh/ or lily.yaml                      │
+│  ❌ No outbound network (except via Lily SSH)                    │
+│  ❌ No ProxyCommand (only ProxyJump supported)                   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 The combination of Lily's validation + sanitization pipeline and a properly
@@ -533,6 +547,7 @@ configured sandbox creates a defense-in-depth posture where:
 4. The agent **cannot** flood hosts (rate limiter caps command frequency)
 5. The agent **cannot** exfiltrate via SSRF (cloud metadata IPs blocked)
 6. The agent **cannot** MITM connections (TOFU host key verification)
+7. The agent **cannot** inject commands via ProxyCommand (not supported)
 
 ---
 

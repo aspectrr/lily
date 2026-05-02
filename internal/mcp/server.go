@@ -167,6 +167,9 @@ func listHostsTool(hosts []sshconfig.Host) (mcp.Tool, mcpserver.ToolHandlerFunc)
 			if h.Port != "" && h.Port != "22" {
 				sb.WriteString(fmt.Sprintf(" :%s", h.Port))
 			}
+			if h.ProxyJump != "" {
+				sb.WriteString(fmt.Sprintf(" [via %s]", h.ProxyJump))
+			}
 			sb.WriteString("\n")
 		}
 
@@ -227,6 +230,8 @@ func checkHostTool(hosts []sshconfig.Host, exec *sshexec.Executor, limiter *rate
 			return errorResult(fmt.Sprintf("host %q not found in SSH config", hostName)), nil
 		}
 
+		host := sshconfig.LookupHost(hosts, hostName)
+
 		// Enforce rate limit
 		limiter.wait()
 
@@ -239,7 +244,11 @@ func checkHostTool(hosts []sshconfig.Host, exec *sshexec.Executor, limiter *rate
 			return errorResult(fmt.Sprintf("host returned exit code %d: %s", result.ExitCode, result.Stderr)), nil
 		}
 
-		return textResult(fmt.Sprintf("Host %q is reachable.", hostName)), nil
+		msg := fmt.Sprintf("Host %q is reachable.", hostName)
+		if host != nil && host.ProxyJump != "" {
+			msg = fmt.Sprintf("Host %q is reachable (via %s).", hostName, host.ProxyJump)
+		}
+		return textResult(msg), nil
 	}
 
 	return tool, handler

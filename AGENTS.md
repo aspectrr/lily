@@ -98,6 +98,24 @@ Lily enforces configurable limits to prevent abuse:
 
 Rate limiting applies to `run_command` and `check_host` only. Read-only tools like `list_hosts` and `validate_command` are not rate-limited.
 
+## ProxyJump (Bastion / Jump Host)
+
+Lily supports SSH ProxyJump for reaching hosts that aren't directly accessible. When a host has `ProxyJump` set in `~/.ssh/config`, Lily automatically tunnels through the specified jump host(s).
+
+```
+Host bastion
+    HostName 203.0.113.1
+    User admin
+
+Host web1
+    HostName 10.0.0.5
+    ProxyJump bastion
+```
+
+The AI agent uses `web1` normally — Lily handles the tunneling transparently. Multi-hop chains and recursive resolution are supported with loop detection.
+
+Only `ProxyJump` is supported (SSH-native tunneling). `ProxyCommand` is intentionally not supported because it executes arbitrary local commands.
+
 ## Allowed Commands
 
 **File inspection:** cat, ls, find, head, tail, stat, file, wc, du, tree, strings, md5sum, sha256sum, readlink, realpath, basename, dirname, base64
