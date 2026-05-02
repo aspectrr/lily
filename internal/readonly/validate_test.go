@@ -602,3 +602,34 @@ func TestValidateCommand_SedWriteFalsePositive(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateCommand_SedWriteViaEFlag(t *testing.T) {
+	// sed -e bypass: second -e expression with bare w must be caught.
+	for _, cmd := range []string{
+		`sed -e 's/foo/bar/g' -e 'wfoo' file`,
+		`sed -e 's/foo/bar/g' -e 'w.ssh/authorized_keys' /etc/passwd`,
+		`sed -e 'wfoo' -e 's/foo/bar/g' file`,
+		`sed -e 's/a/b/g' -e 'wout.txt' file`,
+		`sed -e '1wfoo' file`,
+		`sed -n -e 'w /tmp/out' -e 's/x/y/p' file`,
+		`sed -e 's/a/b/wbar' -e 's/x/y/g' file`,
+	} {
+		if err := ValidateCommand(cmd); err == nil {
+			t.Errorf("expected %q to be blocked (sed -e write bypass)", cmd)
+		} else {
+			t.Logf("OK: %q blocked: %v", cmd, err)
+		}
+	}
+
+	// Safe sed -e commands must still pass.
+	for _, cmd := range []string{
+		`sed -e 's/foo/bar/g' -e 's/baz/qux/g' file`,
+		`sed -e 's/foo/bar/g' webpack.config.js`,
+		`sed -n -e 's/foo/bar/p' -e 's/baz/qux/p' file`,
+		`sed -e 's/w.txt/bar/g' -e 's/flow.txt/x/g' file`,
+	} {
+		if err := ValidateCommand(cmd); err != nil {
+			t.Errorf("expected %q to be allowed, got: %v", cmd, err)
+		}
+	}
+}

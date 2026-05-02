@@ -416,14 +416,21 @@ var sedWriteRe = regexp.MustCompile(`[0-9$\}]w[^\s\;/\}]+`)
 var sedSubstWriteRe = regexp.MustCompile(`s/[^/]*/[^/]*/w\S`)
 
 func validateSedArgs(tokens []string, allowed map[string]bool) error {
-	// The first non-flag token is the sed script; subsequent tokens are input files.
-	// Bare-w checks must only apply to the script token to avoid false positives
-	// on filenames starting with 'w' (e.g. webpack.config.js, words.txt).
-	scriptChecked := false
+	// Track which non-flag tokens are sed scripts (not input filenames).
+	// The first non-flag token is always a script, and every token following a
+	// -e flag is also a script. Bare-w checks must only apply to script tokens
+	// to avoid false positives on filenames starting with 'w' (e.g. webpack.config.js).
+	prevWasE := false
+	firstScript := true
 	for _, tok := range tokens[1:] {
 		if strings.HasPrefix(tok, "-") {
+			prevWasE = (tok == "-e")
 			continue
 		}
+		isScript := firstScript || prevWasE
+		firstScript = false
+		prevWasE = false
+
 		// Block sed write-to-file commands:
 		// - w /path, w\t/path (w followed by whitespace)
 		// - w/out (w followed by /)
@@ -440,9 +447,8 @@ func validateSedArgs(tokens []string, allowed map[string]bool) error {
 		}
 		// Bare w at start of token: wfoo, w.ssh/keys, wout.txt
 		// Catches write commands without an address prefix that sedWriteRe misses.
-		// Only apply to the first non-flag token (the sed script), not filenames.
-		if !scriptChecked {
-			scriptChecked = true
+		// Only apply to script tokens (first positional or after -e), not filenames.
+		if isScript {
 			if len(tok) > 1 && tok[0] == 'w' && tok[1] != ' ' && tok[1] != '\t' {
 				return fmt.Errorf("sed file write is not allowed in read-only mode")
 			}
