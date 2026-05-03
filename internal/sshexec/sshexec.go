@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -388,7 +389,11 @@ func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 }
 
 // limitedBuffer is a bytes.Buffer that stops accepting writes after reaching limit.
-// A mutex is needed because the SSH library may call Write from concurrent goroutines.
+// It shadows both Write and ReadFrom from bytes.Buffer to enforce the limit.
+// Shadowing ReadFrom is critical because io.Copy (used by the SSH library to
+// pipe session output) prefers ReadFrom over Write when the destination
+// implements io.ReaderFrom. Without this shadow, bytes.Buffer.ReadFrom would
+// bypass our limit enforcement entirely.
 type limitedBuffer struct {
 	bytes.Buffer
 	limit     int64
@@ -406,6 +411,40 @@ func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
 		return len(p), nil // Report full write to avoid session errors
 	}
 	return lb.Buffer.Write(p)
+}
+
+// ReadFrom shadows bytes.Buffer.ReadFrom to prevent io.Copy from bypassing
+// our Write-based limit enforcement. io.Copy checks if the destination
+// implements io.ReaderFrom and prefers it over calling Write in a loop.
+//
+// We rely on Write to set truncated when data is genuinely dropped (strict
+// overflow). This avoids false-positive truncation reports when the output
+// is exactly limit bytes — the pre-check (>= limit) would incorrectly fire
+// on exact equality even though no data was lost.
+func (lb *limitedBuffer) ReadFrom(r io.Reader) (n int64, err error) {
+	buf := make([]byte, 32*1024)
+	for {
+		nr, readErr := r.Read(buf)
+		if nr > 0 {
+			nw, writeErr := lb.Write(buf[:nr])
+			if writeErr != nil {
+				return n, writeErr
+			}
+			n += int64(nw)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				readErr = nil
+			}
+			return n, readErr
+		}
+		// Write sets lb.truncated when data is actually dropped.
+		// Drain only when truncation has genuinely occurred.
+		if lb.truncated {
+			_, _ = io.Copy(io.Discard, r)
+			return n, nil
+		}
+	}
 }
 
 func resolveAddress(host *sshconfig.Host) string {
