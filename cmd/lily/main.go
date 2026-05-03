@@ -119,7 +119,7 @@ func main() {
 		if len(args) < 2 {
 			fatal("usage: lily check <host>")
 		}
-		check(sshConfigPath, timeout, args[1])
+		check(sshConfigPath, configFilePath, timeout, args[1])
 	case "list-commands":
 		listCommands(configFilePath)
 	case "config-path":
@@ -256,7 +256,9 @@ func validate(configFilePath, command string) {
 	fmt.Printf("ALLOWED: %q\n", command)
 }
 
-func check(sshConfigPath string, timeout time.Duration, hostName string) {
+func check(sshConfigPath, configFilePath string, timeout time.Duration, hostName string) {
+	cfg := loadConfig(configFilePath)
+
 	hosts, err := sshconfig.Parse(sshConfigPath)
 	if err != nil {
 		fatal(fmt.Sprintf("failed to parse SSH config: %s", err))
@@ -266,7 +268,7 @@ func check(sshConfigPath string, timeout time.Duration, hostName string) {
 		fatal(fmt.Sprintf("host %q not found in SSH config", hostName))
 	}
 
-	exec := sshexec.NewExecutor(hosts, timeout, allowlist.DefaultMaxOutputBytes)
+	exec := sshexec.NewExecutor(hosts, timeout, cfg.GetMaxOutputBytes())
 	result, err := exec.Run(context.Background(), hostName, "echo ok")
 	if err != nil {
 		fatal(fmt.Sprintf("connection failed: %s", err))
