@@ -51,7 +51,7 @@ var baseCommands = map[string]bool{
 
 	// Pipe targets
 	"grep": true, "awk": true, "sed": true, "sort": true, "uniq": true,
-	"cut": true, "tr": true, "xargs": true,
+	"cut": true, "tr": true, "xargs": true, "printf": true,
 }
 
 // alwaysBlockedCommands are commands that can NEVER be allowed, even via config.
