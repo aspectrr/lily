@@ -475,11 +475,11 @@ var blockedCurlHosts = map[string]bool{
 // against these CIDRs to catch alternative IP notations (hex, octal,
 // decimal, mixed) that resolve to the same addresses.
 var blockedCIDRs = []struct {
-	cidr   string
+	cidr    string
 	network *net.IPNet
 }{
-	{cidr: "169.254.0.0/16"},  // Link-local / cloud metadata
-	{cidr: "100.100.0.0/16"},  // Alibaba Cloud metadata
+	{cidr: "169.254.0.0/16"}, // Link-local / cloud metadata
+	{cidr: "100.100.0.0/16"}, // Alibaba Cloud metadata
 }
 
 func init() {

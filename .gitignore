@@ -1,4 +1,5 @@
 bin/
+dist/
 /lily
 *.test
 .pi-lens

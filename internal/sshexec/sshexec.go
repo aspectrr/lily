@@ -225,8 +225,8 @@ func (e *Executor) dialViaProxy(ctx context.Context, target *sshconfig.Host) (ss
 				Client:  nextClient,
 				proxies: proxies,
 			}, nil
-			}
 		}
+	}
 
 	// Unreachable for valid chains
 	cleanup()

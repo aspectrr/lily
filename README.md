@@ -1,13 +1,36 @@
 # lily
 
+[![Release](https://img.shields.io/github/v/release/aspectrr/lily?include_prereleases)](https://github.com/aspectrr/lily/releases) [![Built with GoReleaser](https://img.shields.io/badge/Built%20with-GoReleaser-868e5e4)](https://goreleaser.com)
+
 A compiled Go binary that lets AI agents run **read-only** diagnostic commands on remote hosts via SSH — safely. Commands are validated against a strict allowlist before execution. Destructive operations (`rm`, `sudo`, `bash`, etc.) are hardcoded-blocked and cannot be overridden.
 
 Works as both an **MCP server** (for AI agents) and a **CLI tool** (for humans).
 
 ## Install
 
+### Binary (recommended)
+
 ```bash
-# From source (any Go version 1.23+)
+# macOS (Apple Silicon)
+curl -sL https://github.com/aspectrr/lily/releases/latest/download/lily_darwin_arm64.tar.gz | tar xz
+sudo mv lily /usr/local/bin/
+
+# macOS (Intel)
+curl -sL https://github.com/aspectrr/lily/releases/latest/download/lily_darwin_amd64.tar.gz | tar xz
+sudo mv lily /usr/local/bin/
+
+# Linux (x86_64)
+curl -sL https://github.com/aspectrr/lily/releases/latest/download/lily_linux_amd64.tar.gz | tar xz
+sudo mv lily /usr/local/bin/
+```
+
+### Homebrew
+
+```bash
+brew install aspectrr/lily/lily
+```
+
+### From source
 go install github.com/aspectrr/lily/cmd/lily@latest
 
 # Or clone and build

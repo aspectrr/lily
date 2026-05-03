@@ -5,7 +5,7 @@ GOFLAGS := -trimpath -ldflags="-s -w"
 VERSION ?= $(shell grep 'Version =' internal/version/version.go | sed "s/.*= \"//;s/\".*//")
 LDFLAGS := -s -w -X internal/version.Version=$(VERSION)
 
-.PHONY: build install install-go clean test test-e2e fmt vet all
+.PHONY: build install install-go clean test test-e2e test-verbose fmt vet snapshot release all
 
 all: test build
 
@@ -20,7 +20,7 @@ install-go:
 	$(GO) install ./cmd/lily
 
 clean:
-	rm -rf $(BINDIR)
+	rm -rf $(BINDIR) dist
 
 test:
 	$(GO) test ./... -count=1
@@ -36,3 +36,9 @@ fmt:
 
 vet:
 	$(GO) vet ./...
+
+snapshot:
+	goreleaser release --snapshot --clean
+
+release:
+	goreleaser release --clean

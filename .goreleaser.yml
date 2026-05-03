@@ -1,0 +1,107 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+#
+# Lily MCP - GoReleaser configuration
+#
+# Release: goreleaser release --clean
+# Snapshot: goreleaser release --snapshot --clean
+# Build only: goreleaser build --clean
+# Validate: goreleaser check
+
+version: 2
+
+project_name: lily
+
+builds:
+  - main: ./cmd/lily
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X internal/version.Version={{.Version}}
+
+checksum:
+  name_template: "checksums.txt"
+
+source:
+  enabled: true
+
+archives:
+  - formats: [tar.gz]
+    wrap_in_directory: true
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    # Use .zip for Windows
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^style:"
+      - "^ci:"
+      - "^build:"
+  groups:
+    - title: Features
+      regexp: "^feat"
+      order: 0
+    - title: Bug Fixes
+      regexp: "^fix"
+      order: 1
+    - title: Refactoring
+      regexp: "^refactor"
+      order: 2
+    - title: Other Changes
+      order: 999
+
+release:
+  github:
+    owner: aspectrr
+    name: lily
+  draft: false
+  prerelease: auto
+  mode: replace
+  header: |
+    ## Lily MCP - Read-only remote command execution via SSH for AI agents
+
+    ### Installation
+
+    ```bash
+    # macOS (Apple Silicon)
+    curl -sL https://github.com/aspectrr/lily/releases/download/{{ .Tag }}/lily_darwin_arm64.tar.gz | tar xz
+    sudo mv lily /usr/local/bin/
+
+    # macOS (Intel)
+    curl -sL https://github.com/aspectrr/lily/releases/download/{{ .Tag }}/lily_darwin_amd64.tar.gz | tar xz
+    sudo mv lily /usr/local/bin/
+
+    # Linux
+    curl -sL https://github.com/aspectrr/lily/releases/download/{{ .Tag }}/lily_linux_amd64.tar.gz | tar xz
+    sudo mv lily /usr/local/bin/
+    ```
+
+brews:
+  - name: lily
+    repository:
+      owner: aspectrr
+      name: homebrew-lily
+    directory: Formula
+    homepage: "https://github.com/aspectrr/lily"
+    description: "Read-only remote command execution via SSH for AI agents"
+    license: MIT
+    install: |
+      bin.install "lily"
+    test: |
+      system "#{bin}/lily version"
