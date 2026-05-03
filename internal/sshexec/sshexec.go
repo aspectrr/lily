@@ -402,7 +402,9 @@ func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
 		// Accept only what fits
 		remaining := lb.limit - int64(lb.Buffer.Len())
 		if remaining > 0 {
-			lb.Buffer.Write(p[:remaining])
+			if _, err := lb.Buffer.Write(p[:remaining]); err != nil {
+				return len(p), fmt.Errorf("output buffer write failed: %w", err)
+			}
 		}
 		lb.truncated = true
 		return len(p), nil // Report full write to avoid session errors
