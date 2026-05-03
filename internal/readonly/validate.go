@@ -19,7 +19,7 @@ var baseCommands = map[string]bool{
 	"realpath": true, "basename": true, "dirname": true, "base64": true,
 
 	// Process/system
-	"ps": true, "top": true, "pgrep": true,
+	"ps": true, "pgrep": true,
 	"systemctl": true, "journalctl": true, "dmesg": true,
 
 	// Network
