@@ -172,6 +172,8 @@ func TestValidateCommand_Blocked(t *testing.T) {
 		{"curl http://0251.0376.0251.0376/", "curl SSRF octal IP bypass"},
 		{"curl http://2852039166/", "curl SSRF decimal IP bypass"},
 		{"curl http://0xa9.0xfe.0xa9.0xfe/", "curl SSRF mixed hex octets bypass"},
+		{"sort -o /tmp/evil file", "sort -o writes to file"},
+		{"sort --output /tmp/evil file", "sort --output writes to file"},
 		{"echo ${PATH}", "parameter expansion ${}"},
 		{"echo \"${HOME}\"", "parameter expansion in double quotes"},
 		{"echo ${!PREFIX*}", "indirect variable expansion"},

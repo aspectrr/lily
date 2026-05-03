@@ -83,6 +83,7 @@ var baseBlockedFlags = map[string][]string{
 	"sed":  {"-i", "--in-place"},
 	"curl": {"-X", "--request", "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "-T", "--upload-file", "-o", "--output", "-O", "--remote-name", "-K", "--config", "-x", "--proxy"},
 	"find": {"-exec", "-execdir", "-ok", "-okdir"},
+	"sort": {"-o", "--output"},
 }
 
 // baseSubcommandRestrictions are hardcoded restrictions that can't be removed.
