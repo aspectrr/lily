@@ -1,4 +1,6 @@
-# lily
+# 🪷 lily
+
+![Water Lilies](docs/assets/water-lilies-38-4037232764.jpeg)
 
 [![Release](https://img.shields.io/github/v/release/aspectrr/lily?include_prereleases)](https://github.com/aspectrr/lily/releases) [![Built with GoReleaser](https://img.shields.io/badge/Built%20with-GoReleaser-868e5e4)](https://goreleaser.com)
 
@@ -31,14 +33,17 @@ brew install aspectrr/lily/lily
 ```
 
 ### From source
+
 go install github.com/aspectrr/lily/cmd/lily@latest
 
 # Or clone and build
+
 git clone https://github.com/aspectrr/lily.git
 cd lily
 make build
-sudo make install   # copies bin/lily to /usr/local/bin
-```
+sudo make install # copies bin/lily to /usr/local/bin
+
+````
 
 ## Quick Start
 
@@ -54,7 +59,7 @@ lily run web1 "systemctl status nginx"
 
 # Install into your AI agent
 lily install-skill claude-code
-```
+````
 
 ---
 
