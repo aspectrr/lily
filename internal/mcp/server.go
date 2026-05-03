@@ -11,12 +11,12 @@ import (
 	"github.com/aspectrr/lily/internal/readonly"
 	"github.com/aspectrr/lily/internal/sshconfig"
 	"github.com/aspectrr/lily/internal/sshexec"
+	"github.com/aspectrr/lily/internal/version"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 const serverName = "lily"
-const serverVersion = "0.2.0"
 
 // rateLimiter enforces a minimum interval between command executions.
 type rateLimiter struct {
@@ -42,7 +42,7 @@ func (r *rateLimiter) wait() {
 
 // NewServer creates a configured MCP server with all tools registered.
 func NewServer(hosts []sshconfig.Host, timeout time.Duration, cfg *allowlist.Config) *mcpserver.MCPServer {
-	s := mcpserver.NewMCPServer(serverName, serverVersion)
+	s := mcpserver.NewMCPServer(serverName, version.Version)
 
 	maxOutput := cfg.GetMaxOutputBytes()
 	exec := sshexec.NewExecutor(hosts, timeout, maxOutput)

@@ -184,29 +184,32 @@ func (e *Executor) dialViaProxy(ctx context.Context, target *sshconfig.Host) (ss
 	var proxies []*ssh.Client
 	prevClient := firstClient
 
+	// cleanup closes all tracked proxy connections on error.
+	cleanup := func() {
+		prevClient.Close()
+		closeClients(proxies)
+	}
+
 	for i := 1; i < len(chain); i++ {
 		hop := chain[i]
 		hopAddr := resolveAddress(hop)
 
 		hopConfig, err := buildSSHConfig(hop)
 		if err != nil {
-			prevClient.Close()
-			closeClients(proxies)
+			cleanup()
 			return nil, fmt.Errorf("config for %s: %w", hop.Host, err)
 		}
 
 		conn, err := prevClient.Dial("tcp", hopAddr)
 		if err != nil {
-			prevClient.Close()
-			closeClients(proxies)
+			cleanup()
 			return nil, fmt.Errorf("tunnel to %s: %w", hop.Host, err)
 		}
 
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, hopAddr, hopConfig)
 		if err != nil {
 			conn.Close()
-			prevClient.Close()
-			closeClients(proxies)
+			cleanup()
 			return nil, fmt.Errorf("SSH to %s via proxy: %w", hop.Host, err)
 		}
 
@@ -227,8 +230,7 @@ func (e *Executor) dialViaProxy(ctx context.Context, target *sshconfig.Host) (ss
 	}
 
 	// Unreachable for valid chains
-	prevClient.Close()
-	closeClients(proxies)
+	cleanup()
 	return nil, fmt.Errorf("internal error: empty proxy chain")
 }
 
@@ -405,7 +407,9 @@ func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
 		// Accept only what fits
 		remaining := lb.limit - int64(lb.Buffer.Len())
 		if remaining > 0 {
-			lb.Buffer.Write(p[:remaining])
+			if _, err := lb.Buffer.Write(p[:remaining]); err != nil {
+				return len(p), fmt.Errorf("output buffer write failed: %w", err)
+			}
 		}
 		lb.truncated = true
 		return len(p), nil // Report full write to avoid session errors

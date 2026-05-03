@@ -531,6 +531,13 @@ func TestDmesg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dmesg failed: %v", err)
 	}
+	if result.ExitCode != 0 {
+		t.Fatalf("dmesg exited %d: %s", result.ExitCode, result.Stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	if len(lines) == 0 {
+		t.Fatal("expected non-empty dmesg output")
+	}
 	t.Logf("dmesg: %s", result.Stdout)
 }
 
