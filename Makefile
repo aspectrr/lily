@@ -2,6 +2,8 @@ BINARY  := lily
 BINDIR  := bin
 GO      := go
 GOFLAGS := -trimpath -ldflags="-s -w"
+VERSION ?= $(shell grep 'Version =' internal/version/version.go | sed "s/.*= \"//;s/\".*//")
+LDFLAGS := -s -w -X internal/version.Version=$(VERSION)
 
 .PHONY: build install install-go clean test test-e2e fmt vet all
 
@@ -9,7 +11,7 @@ all: test build
 
 build:
 	@mkdir -p $(BINDIR)
-	$(GO) build $(GOFLAGS) -o $(BINDIR)/$(BINARY) ./cmd/lily
+	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o $(BINDIR)/$(BINARY) ./cmd/lily
 
 install: build
 	cp $(BINDIR)/$(BINARY) /usr/local/bin/
@@ -21,6 +23,9 @@ clean:
 	rm -rf $(BINDIR)
 
 test:
+	$(GO) test ./... -count=1
+
+test-verbose:
 	$(GO) test ./... -v -count=1
 
 test-e2e:

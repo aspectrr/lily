@@ -14,6 +14,7 @@ import (
 	"github.com/aspectrr/lily/internal/readonly"
 	"github.com/aspectrr/lily/internal/sshconfig"
 	"github.com/aspectrr/lily/internal/sshexec"
+	"github.com/aspectrr/lily/internal/version"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -53,7 +54,9 @@ Examples:
   lily list-agents
 `
 
-const version = "0.2.0"
+// version is now defined in internal/version to avoid duplication.
+// Use: version.Version
+// Build override: go build -ldflags="-X internal/version.Version=X.Y.Z"
 
 func main() {
 	args := os.Args[1:]
@@ -139,7 +142,7 @@ func main() {
 	case "list-agents":
 		listAgents()
 	case "version":
-		fmt.Printf("lily %s\n", version)
+		fmt.Printf("lily %s\n", version.Version)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		fmt.Print(usageText)
