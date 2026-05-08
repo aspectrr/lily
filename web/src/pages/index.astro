@@ -1,0 +1,519 @@
+---
+
+---
+
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Lily — The AI Safety Layer</title>
+        <style is:global>
+            @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap");
+
+            *,
+            *::before,
+            *::after {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            :root {
+                --bg: #000;
+                --surface: #0a0a0a;
+                --border: #1a1a1a;
+                --fg: #e0e0e0;
+                --muted: #555;
+                --green: #4ade80;
+                --red: #f87171;
+            }
+
+            body {
+                background: var(--bg);
+                color: var(--fg);
+                font-family: "JetBrains Mono", monospace;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                overflow: hidden;
+            }
+
+            .hero {
+                position: relative;
+                z-index: 1;
+                display: flex;
+                align-items: center;
+                gap: 5rem;
+                padding: 2rem;
+                max-width: 1150px;
+                width: 100%;
+            }
+
+            /* ── Terminal ── */
+            .terminal-wrapper {
+                flex-shrink: 0;
+            }
+
+            .terminal {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                width: 460px;
+                overflow: hidden;
+                box-shadow:
+                    0 0 0 1px #111,
+                    0 20px 60px -10px rgba(0, 0, 0, 0.8);
+            }
+
+            .terminal-bar {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 12px 16px;
+                background: #080808;
+                border-bottom: 1px solid var(--border);
+            }
+
+            .terminal-dot {
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: #333;
+            }
+
+            .terminal-title {
+                margin-left: 8px;
+                font-size: 12px;
+                color: var(--muted);
+            }
+
+            .terminal-body {
+                padding: 16px 20px;
+                font-family: "JetBrains Mono", monospace;
+                font-size: 12.5px;
+                line-height: 1.65;
+                color: var(--fg);
+                white-space: pre;
+                overflow: hidden;
+                height: 380px;
+                display: flex;
+                flex-direction: column;
+                justify-content: flex-end;
+            }
+
+            .terminal-body .line {
+                min-height: 1.65em;
+            }
+
+            .terminal-body .prompt {
+                color: #555;
+            }
+            .terminal-body .cmd {
+                color: #ccc;
+            }
+            .terminal-body .ok {
+                color: var(--green);
+            }
+            .terminal-body .block {
+                color: var(--red);
+            }
+            .terminal-body .result {
+                color: #555;
+            }
+            .terminal-body .dim {
+                color: #333;
+            }
+            .terminal-body .cursor {
+                display: inline-block;
+                width: 8px;
+                height: 15px;
+                background: #555;
+                vertical-align: text-bottom;
+                animation: blink 1s step-end infinite;
+            }
+
+            @keyframes blink {
+                50% {
+                    opacity: 0;
+                }
+            }
+
+            /* ── Right side ── */
+            .content {
+                display: flex;
+                flex-direction: column;
+                gap: 1.5rem;
+            }
+
+            .brand {
+                display: flex;
+                align-items: baseline;
+                gap: 0.75rem;
+            }
+
+            .brand-emoji {
+                font-size: 2.5rem;
+            }
+
+            .brand-name {
+                font-size: 2rem;
+                font-weight: 600;
+                color: var(--fg);
+                letter-spacing: -0.02em;
+            }
+
+            .tagline {
+                font-size: 3.25rem;
+                font-weight: 700;
+                line-height: 1.15;
+                letter-spacing: -0.03em;
+                color: var(--fg);
+            }
+
+            .subtitle {
+                font-size: 0.95rem;
+                color: var(--muted);
+                max-width: 420px;
+                line-height: 1.7;
+            }
+
+            .install-box {
+                margin-top: 0.5rem;
+                display: flex;
+                align-items: center;
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 4px 4px 4px 16px;
+                width: fit-content;
+                max-width: 100%;
+                transition: border-color 0.2s;
+            }
+
+            .install-box:hover {
+                border-color: #333;
+            }
+
+            .install-box code {
+                font-size: 0.8rem;
+                color: var(--fg);
+                white-space: nowrap;
+                user-select: all;
+            }
+
+            .install-box .dollar {
+                color: #555;
+                margin-right: 8px;
+                user-select: none;
+            }
+
+            .copy-btn {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: #222;
+                color: #fff;
+                border: 1px solid #333;
+                border-radius: 7px;
+                padding: 10px 14px;
+                margin-left: 8px;
+                cursor: pointer;
+                font-size: 13px;
+                font-weight: 500;
+                white-space: nowrap;
+                transition:
+                    background 0.15s,
+                    border-color 0.15s;
+            }
+
+            .copy-btn:hover {
+                background: #333;
+                border-color: #444;
+            }
+
+            .copy-btn.copied {
+                background: #fff;
+                color: #000;
+                border-color: #fff;
+            }
+
+            .install-label {
+                font-size: 0.75rem;
+                color: var(--muted);
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                margin-bottom: 0.35rem;
+                font-weight: 500;
+            }
+
+            @media (max-width: 950px) {
+                .hero {
+                    flex-direction: column;
+                    gap: 3rem;
+                    padding: 3rem 1.5rem;
+                }
+                .terminal {
+                    width: min(460px, 100%);
+                }
+                .tagline {
+                    font-size: 2.25rem;
+                }
+                .content {
+                    align-items: center;
+                    text-align: center;
+                }
+                .install-box {
+                    width: 100%;
+                }
+                .install-box code {
+                    font-size: 0.75rem;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="hero">
+            <div class="terminal-wrapper">
+                <div class="terminal">
+                    <div class="terminal-bar">
+                        <div class="terminal-dot"></div>
+                        <div class="terminal-dot"></div>
+                        <div class="terminal-dot"></div>
+                        <span class="terminal-title">lily</span>
+                    </div>
+                    <div class="terminal-body" id="term"></div>
+                </div>
+            </div>
+
+            <div class="content">
+                <div class="brand">
+                    <span class="brand-emoji">🪷</span>
+                    <span class="brand-name">Lily</span>
+                </div>
+
+                <h1 class="tagline">
+                    The AI<br /><span>Safety Layer</span>
+                </h1>
+
+                <p class="subtitle">
+                    Read-only SSH for AI agents. Use your existing SSH config.
+                    No install on the remote host. Let the agent use MCP/CLI or
+                    install the hook.
+                </p>
+
+                <div>
+                    <div class="install-label">Install</div>
+                    <div class="install-box" id="installBox">
+                        <span class="dollar">$</span>
+                        <code id="installCmd"
+                            >go install github.com/aspectrr/lily@latest</code
+                        >
+                        <button
+                            class="copy-btn"
+                            id="copyBtn"
+                            aria-label="Copy install command">Copy</button
+                        >
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            // ── Copy button ──
+            const copyBtn = document.getElementById("copyBtn")!;
+            const cmdEl = document.getElementById("installCmd")!;
+            copyBtn.addEventListener("click", async () => {
+                await navigator.clipboard.writeText(cmdEl.textContent || "");
+                copyBtn.textContent = "Copied!";
+                copyBtn.classList.add("copied");
+                setTimeout(() => {
+                    copyBtn.textContent = "Copy";
+                    copyBtn.classList.remove("copied");
+                }, 2000);
+            });
+
+            // ── Terminal animation ──
+            const term = document.getElementById("term")!;
+            const MAX_LINES = 19;
+
+            interface Line {
+                text: string;
+                cls: string;
+            }
+
+            interface Command {
+                cmd: string;
+                allowed: boolean;
+                result: Line[];
+            }
+
+            const commands: Command[] = [
+                {
+                    cmd: 'run_command("web1", "ps aux")',
+                    allowed: true,
+                    result: [
+                        { text: "PID   TT  STAT  COMMAND", cls: "result" },
+                        { text: "1     ?   Ss    systemd", cls: "result" },
+                        { text: "847   ?   S     nginx", cls: "result" },
+                    ],
+                },
+                {
+                    cmd: 'run_command("web1", "rm -rf /")',
+                    allowed: false,
+                    result: [{ text: '"rm" is not allowed', cls: "block" }],
+                },
+                {
+                    cmd: 'run_command("db1", "cat /etc/hosts")',
+                    allowed: true,
+                    result: [
+                        { text: "127.0.0.1 localhost", cls: "result" },
+                        { text: "::1       localhost", cls: "result" },
+                    ],
+                },
+                {
+                    cmd: 'run_command("web1", "sudo reboot")',
+                    allowed: false,
+                    result: [{ text: '"sudo" is not allowed', cls: "block" }],
+                },
+                {
+                    cmd: 'run_command("web1", "df -h")',
+                    allowed: true,
+                    result: [
+                        {
+                            text: "Filesystem  Size  Used Avail Use%",
+                            cls: "result",
+                        },
+                        {
+                            text: "/dev/sda1   50G   12G  36G   25%",
+                            cls: "result",
+                        },
+                    ],
+                },
+                {
+                    cmd: 'run_command("db1", "bash -c ...")',
+                    allowed: false,
+                    result: [{ text: '"bash" is not allowed', cls: "block" }],
+                },
+                {
+                    cmd: 'run_command("web1", "journalctl -u nginx")',
+                    allowed: true,
+                    result: [
+                        {
+                            text: "May 07 12:00 nginx[847]: started",
+                            cls: "result",
+                        },
+                        {
+                            text: "May 07 12:01 nginx[847]: listening",
+                            cls: "result",
+                        },
+                    ],
+                },
+                {
+                    cmd: 'run_command("web1", "chmod 777 /etc")',
+                    allowed: false,
+                    result: [{ text: '"chmod" is not allowed', cls: "block" }],
+                },
+            ];
+
+            let allLines: Line[] = [];
+            let cursorEl: HTMLSpanElement | null = null;
+
+            function sleep(ms: number) {
+                return new Promise((r) => setTimeout(r, ms));
+            }
+
+            function scrollLines() {
+                term.innerHTML = "";
+                const start = Math.max(0, allLines.length - MAX_LINES);
+                for (let i = start; i < allLines.length; i++) {
+                    const div = document.createElement("div");
+                    div.className = "line";
+                    const span = document.createElement("span");
+                    span.className = allLines[i].cls;
+                    span.textContent = allLines[i].text;
+                    div.appendChild(span);
+                    term.appendChild(div);
+                }
+            }
+
+            function addCursor() {
+                cursorEl = document.createElement("span");
+                cursorEl.className = "cursor";
+                // append to last line
+                const lastLine = term.querySelector(".line:last-child");
+                if (lastLine) lastLine.appendChild(cursorEl);
+                else term.appendChild(cursorEl);
+            }
+
+            function removeCursor() {
+                if (cursorEl) cursorEl.remove();
+                cursorEl = null;
+            }
+
+            async function typeText(text: string, cls: string) {
+                for (let c = 0; c <= text.length; c++) {
+                    const partial = text.slice(0, c);
+                    removeCursor();
+                    // update last line
+                    allLines[allLines.length - 1] = { text: partial, cls };
+                    scrollLines();
+                    addCursor();
+                    const ch = text[c];
+                    if (!ch) break;
+                    if (ch !== " ") await sleep(18 + Math.random() * 22);
+                }
+                removeCursor();
+            }
+
+            async function run() {
+                // starter
+                allLines = [
+                    { text: "$ lily serve", cls: "prompt" },
+                    { text: "  Lily MCP server running on stdio", cls: "dim" },
+                    { text: "  Ready for AI agent connections.", cls: "dim" },
+                    { text: "", cls: "" },
+                ];
+                scrollLines();
+                await sleep(2000);
+
+                // eslint-disable-next-line no-constant-condition
+                while (true) {
+                    for (const c of commands) {
+                        // type the command
+                        allLines.push({ text: "→ " + c.cmd, cls: "cmd" });
+                        await typeText("→ " + c.cmd, "cmd");
+                        await sleep(400);
+
+                        // verdict
+                        if (c.allowed) {
+                            allLines.push({ text: "  ✓ ALLOWED", cls: "ok" });
+                        } else {
+                            allLines.push({
+                                text: "  ✗ BLOCKED",
+                                cls: "block",
+                            });
+                        }
+                        scrollLines();
+                        await sleep(250);
+
+                        // result lines
+                        for (const r of c.result) {
+                            allLines.push({ text: "  " + r.text, cls: r.cls });
+                            scrollLines();
+                            await sleep(50);
+                        }
+
+                        // blank line separator
+                        allLines.push({ text: "", cls: "" });
+                        scrollLines();
+                        await sleep(700);
+                    }
+                }
+            }
+
+            run();
+        </script>
+    </body>
+</html>
