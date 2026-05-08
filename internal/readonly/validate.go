@@ -2,8 +2,10 @@ package readonly
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -17,7 +19,7 @@ var baseCommands = map[string]bool{
 	"realpath": true, "basename": true, "dirname": true, "base64": true,
 
 	// Process/system
-	"ps": true, "top": true, "pgrep": true,
+	"ps": true, "pgrep": true,
 	"systemctl": true, "journalctl": true, "dmesg": true,
 
 	// Network
@@ -49,7 +51,7 @@ var baseCommands = map[string]bool{
 
 	// Pipe targets
 	"grep": true, "awk": true, "sed": true, "sort": true, "uniq": true,
-	"cut": true, "tr": true, "xargs": true,
+	"cut": true, "tr": true, "xargs": true, "printf": true,
 }
 
 // alwaysBlockedCommands are commands that can NEVER be allowed, even via config.
@@ -81,6 +83,7 @@ var baseBlockedFlags = map[string][]string{
 	"sed":  {"-i", "--in-place"},
 	"curl": {"-X", "--request", "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "-F", "--form", "-T", "--upload-file", "-o", "--output", "-O", "--remote-name", "-K", "--config", "-x", "--proxy"},
 	"find": {"-exec", "-execdir", "-ok", "-okdir"},
+	"sort": {"-o", "--output"},
 }
 
 // baseSubcommandRestrictions are hardcoded restrictions that can't be removed.
@@ -458,11 +461,35 @@ func validateSedArgs(tokens []string, allowed map[string]bool) error {
 }
 
 // blockedCurlHosts are hostnames that curl must never reach (cloud metadata services).
+// These are checked via string matching as a first pass.
+// IP-based checks use blockedCIDRs for proper CIDR matching.
 var blockedCurlHosts = map[string]bool{
 	"169.254.169.254":          true, // AWS/GCP/Azure/OpenStack metadata
 	"100.100.100.200":          true, // Alibaba Cloud metadata
 	"metadata.google.internal": true, // GCP metadata
 	"metadata.internal":        true, // Generic cloud metadata
+}
+
+// blockedCIDRs are IP ranges that curl must never reach.
+// The host extracted from the URL is resolved to a net.IP and checked
+// against these CIDRs to catch alternative IP notations (hex, octal,
+// decimal, mixed) that resolve to the same addresses.
+var blockedCIDRs = []struct {
+	cidr    string
+	network *net.IPNet
+}{
+	{cidr: "169.254.0.0/16"}, // Link-local / cloud metadata
+	{cidr: "100.100.0.0/16"}, // Alibaba Cloud metadata
+}
+
+func init() {
+	for i := range blockedCIDRs {
+		_, network, err := net.ParseCIDR(blockedCIDRs[i].cidr)
+		if err != nil {
+			panic(fmt.Sprintf("invalid blocked CIDR %q: %v", blockedCIDRs[i].cidr, err))
+		}
+		blockedCIDRs[i].network = network
+	}
 }
 
 func validateCurlArgs(tokens []string, allowed map[string]bool) error {
@@ -494,18 +521,22 @@ func validateCurlArgs(tokens []string, allowed map[string]bool) error {
 		return nil
 	}
 
-	// Check blocked hostnames
+	// Check blocked hostnames (fast path: string matching)
 	lowerHost := strings.ToLower(host)
 	if blockedCurlHosts[lowerHost] || blockedCurlHosts[host] {
 		return fmt.Errorf("curl to cloud metadata endpoint %q is not allowed in read-only mode", host)
 	}
 
-	// Check blocked IP ranges (169.254.0.0/16 link-local, includes cloud metadata)
-	if strings.HasPrefix(host, "169.254.") {
-		return fmt.Errorf("curl to link-local/metadata IP %q is not allowed in read-only mode", host)
-	}
-	if strings.HasPrefix(host, "100.100.") {
-		return fmt.Errorf("curl to cloud metadata IP %q is not allowed in read-only mode", host)
+	// Check blocked IP ranges using proper IP resolution.
+	// This catches alternative IP notations (hex, octal, decimal, mixed)
+	// that bypass simple string prefix matching.
+	// e.g. 0xa9fea9fe == 169.254.169.254, 0251.0376.0251.0376 == 169.254.169.254
+	if ip := resolveIPLikeHost(host); ip != nil {
+		for _, cidr := range blockedCIDRs {
+			if cidr.network.Contains(ip) {
+				return fmt.Errorf("curl to cloud metadata IP %q is not allowed in read-only mode", host)
+			}
+		}
 	}
 
 	return nil
@@ -540,6 +571,83 @@ func extractHostFromURL(urlStr string) string {
 		s = s[idx+1:]
 	}
 	return s
+}
+
+// resolveIPLikeHost attempts to resolve a hostname string to a net.IP
+// by handling alternative IP notations that the remote shell / curl might resolve:
+//   - Standard dotted decimal: 169.254.169.254
+//   - Hex: 0xa9fea9fe, 0xA9FE.0xA9FE
+//   - Octal: 0251.0376.0251.0376
+//   - Decimal (single number): 2852039166
+//   - Mixed: 169.254.0xa9.0xfe
+//
+// Returns nil if the host is a DNS name or not a recognized IP format.
+func resolveIPLikeHost(host string) net.IP {
+	// Standard IP first
+	if ip := net.ParseIP(host); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return v4
+		}
+		return ip
+	}
+
+	// Try as a single decimal/hex/octal number (covers the "no dots" case)
+	if !strings.Contains(host, ".") {
+		if v := parseIPPart(host); v >= 0 && v <= 0xFFFFFFFF {
+			return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+		}
+		return nil
+	}
+
+	// Dotted notation with mixed bases
+	parts := strings.Split(host, ".")
+	if len(parts) != 4 {
+		return nil
+	}
+
+	var octets [4]uint32
+	for i, p := range parts {
+		v := parseIPPart(p)
+		if v < 0 || v > 255 {
+			return nil
+		}
+		octets[i] = uint32(v)
+	}
+
+	return net.IPv4(byte(octets[0]), byte(octets[1]), byte(octets[2]), byte(octets[3]))
+}
+
+// parseIPPart parses a single IP octet that may be in decimal, hex (0x),
+// or octal (leading 0) notation. Returns -1 on failure.
+func parseIPPart(s string) int64 {
+	if len(s) == 0 {
+		return -1
+	}
+
+	// Hex: 0x or 0X prefix
+	if len(s) > 2 && (strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X")) {
+		v, err := strconv.ParseInt(s[2:], 16, 64)
+		if err != nil {
+			return -1
+		}
+		return v
+	}
+
+	// Octal: leading 0 (but not just "0")
+	if len(s) > 1 && s[0] == '0' {
+		v, err := strconv.ParseInt(s, 8, 64)
+		if err != nil {
+			return -1
+		}
+		return v
+	}
+
+	// Decimal
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return v
 }
 
 func validateOpenSSLArgs(tokens []string, allowed map[string]bool) error {

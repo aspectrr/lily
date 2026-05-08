@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -183,29 +184,32 @@ func (e *Executor) dialViaProxy(ctx context.Context, target *sshconfig.Host) (ss
 	var proxies []*ssh.Client
 	prevClient := firstClient
 
+	// cleanup closes all tracked proxy connections on error.
+	cleanup := func() {
+		prevClient.Close()
+		closeClients(proxies)
+	}
+
 	for i := 1; i < len(chain); i++ {
 		hop := chain[i]
 		hopAddr := resolveAddress(hop)
 
 		hopConfig, err := buildSSHConfig(hop)
 		if err != nil {
-			prevClient.Close()
-			closeClients(proxies)
+			cleanup()
 			return nil, fmt.Errorf("config for %s: %w", hop.Host, err)
 		}
 
 		conn, err := prevClient.Dial("tcp", hopAddr)
 		if err != nil {
-			prevClient.Close()
-			closeClients(proxies)
+			cleanup()
 			return nil, fmt.Errorf("tunnel to %s: %w", hop.Host, err)
 		}
 
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, hopAddr, hopConfig)
 		if err != nil {
 			conn.Close()
-			prevClient.Close()
-			closeClients(proxies)
+			cleanup()
 			return nil, fmt.Errorf("SSH to %s via proxy: %w", hop.Host, err)
 		}
 
@@ -226,8 +230,7 @@ func (e *Executor) dialViaProxy(ctx context.Context, target *sshconfig.Host) (ss
 	}
 
 	// Unreachable for valid chains
-	prevClient.Close()
-	closeClients(proxies)
+	cleanup()
 	return nil, fmt.Errorf("internal error: empty proxy chain")
 }
 
@@ -388,7 +391,11 @@ func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 }
 
 // limitedBuffer is a bytes.Buffer that stops accepting writes after reaching limit.
-// A mutex is needed because the SSH library may call Write from concurrent goroutines.
+// It shadows both Write and ReadFrom from bytes.Buffer to enforce the limit.
+// Shadowing ReadFrom is critical because io.Copy (used by the SSH library to
+// pipe session output) prefers ReadFrom over Write when the destination
+// implements io.ReaderFrom. Without this shadow, bytes.Buffer.ReadFrom would
+// bypass our limit enforcement entirely.
 type limitedBuffer struct {
 	bytes.Buffer
 	limit     int64
@@ -400,12 +407,48 @@ func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
 		// Accept only what fits
 		remaining := lb.limit - int64(lb.Buffer.Len())
 		if remaining > 0 {
-			lb.Buffer.Write(p[:remaining])
+			if _, err := lb.Buffer.Write(p[:remaining]); err != nil {
+				return len(p), fmt.Errorf("output buffer write failed: %w", err)
+			}
 		}
 		lb.truncated = true
 		return len(p), nil // Report full write to avoid session errors
 	}
 	return lb.Buffer.Write(p)
+}
+
+// ReadFrom shadows bytes.Buffer.ReadFrom to prevent io.Copy from bypassing
+// our Write-based limit enforcement. io.Copy checks if the destination
+// implements io.ReaderFrom and prefers it over calling Write in a loop.
+//
+// We rely on Write to set truncated when data is genuinely dropped (strict
+// overflow). This avoids false-positive truncation reports when the output
+// is exactly limit bytes — the pre-check (>= limit) would incorrectly fire
+// on exact equality even though no data was lost.
+func (lb *limitedBuffer) ReadFrom(r io.Reader) (n int64, err error) {
+	buf := make([]byte, 32*1024)
+	for {
+		nr, readErr := r.Read(buf)
+		if nr > 0 {
+			nw, writeErr := lb.Write(buf[:nr])
+			if writeErr != nil {
+				return n, writeErr
+			}
+			n += int64(nw)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				readErr = nil
+			}
+			return n, readErr
+		}
+		// Write sets lb.truncated when data is actually dropped.
+		// Drain only when truncation has genuinely occurred.
+		if lb.truncated {
+			_, _ = io.Copy(io.Discard, r)
+			return n, nil
+		}
+	}
 }
 
 func resolveAddress(host *sshconfig.Host) string {
