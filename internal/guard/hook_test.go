@@ -186,45 +186,6 @@ func TestInstallUninstallClaudeCode(t *testing.T) {
 	}
 }
 
-func TestInstallPiExtension(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "lily-guard.ts")
-
-	target := GuardTarget{
-		Name:         "pi",
-		ConfigPath:   configPath,
-		ConfigFormat: "pi-extension",
-	}
-
-	if err := InstallGuard(target, "lily"); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	if !containsKeyword(content, "lily-guard") {
-		t.Fatal("expected lily-guard in extension file")
-	}
-	if !containsKeyword(content, "tool_call") {
-		t.Fatal("expected tool_call in extension file")
-	}
-	if !containsKeyword(content, "rewrite") {
-		t.Fatal("expected rewrite in extension file")
-	}
-
-	// Uninstall
-	if err := UninstallGuard(target); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
-		t.Fatal("expected extension file to be removed")
-	}
-}
-
 func TestInstallUninstallCodex(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "hooks.json")

@@ -82,6 +82,9 @@ lily <command> [arguments]
 | `list-commands`                | Show all allowed commands and subcommand restrictions   |
 | `config-path`                  | Print the config file path                              |
 | `validate-config`              | Validate the lily.yaml config file                      |
+| `aws <args...>`                | Run validated command on AWS instance via SSM           |
+| `gcloud <args...>`             | Run validated command on GCP instance via gcloud        |
+| `azure <args...>`              | Run validated command on Azure VM via az                |
 | `install-skill <agent\|all>`   | Install lily into an agent's MCP config                 |
 | `uninstall-skill <agent\|all>` | Remove lily from an agent's MCP config                  |
 | `list-agents`                  | Show detected agents that support MCP                   |
@@ -343,6 +346,71 @@ The `list_hosts` tool and `lily hosts` command show which hosts use a proxy:
 ### What runs on the remote
 
 The validated command is sent over SSH and executed by the remote host's default shell. No agent, daemon, or restricted shell is installed on the remote — all safety enforcement happens client-side in the compiled binary.
+
+---
+
+## Cloud Provider SSH
+
+Lily extends its read-only command validation to cloud provider CLI commands. Agents can run diagnostic commands on AWS, Google Cloud, and Azure instances without needing SSH config entries.
+
+### Usage
+
+```bash
+# AWS SSM Session Manager
+lily aws ssm start-session --target i-0123456789abcdef0 --command "systemctl status nginx"
+
+# Google Cloud
+lily gcloud compute ssh my-instance --project my-project --zone us-central1-a --command "ps aux"
+
+# Azure
+lily azure ssh vm --resource-group MyResourceGroup --name MyVM --command "uptime"
+```
+
+Without `--command`, opens an interactive restricted shell (same as `lily ssh`):
+
+```bash
+lily aws ssm start-session --target i-12345
+lily gcloud compute ssh my-instance --project P --zone Z
+lily azure ssh vm --resource-group RG --name VM
+```
+
+### How it works
+
+| Provider | Command mechanism                                 | Requirements                             |
+| -------- | ------------------------------------------------- | ---------------------------------------- |
+| AWS SSM  | `send-command` + `get-command-invocation` polling | SSM Agent on instance, `aws` CLI locally |
+| GCloud   | Native `--command` flag                           | `gcloud` CLI locally                     |
+| Azure    | `--` separator for SSH command                    | `az` CLI + `ssh` extension               |
+
+AWS uses `aws ssm send-command` with the `AWS-RunShellScript` document under the hood. The command is sent, and lily polls `get-command-invocation` until the result is available. This provides synchronous, reliable command execution.
+
+GCloud uses `gcloud compute ssh --command` which natively supports non-interactive command execution. IAP tunneling (`--tunnel-through-iap`) is supported.
+
+Azure uses `az ssh vm -- <command>` to pass the validated command to the underlying SSH session. Azure Bastion (`az network bastion ssh`) is also supported.
+
+### Guard integration
+
+The guard automatically detects raw cloud CLI SSH commands and rewrites them to use lily:
+
+| Agent runs                                   | Guard rewrites to                                 |
+| -------------------------------------------- | ------------------------------------------------- |
+| `aws ssm start-session --target ID`          | `lily aws ssm start-session --target ID`          |
+| `aws ec2-instance-connect ssh --instance-id` | `lily aws ec2-instance-connect ssh --instance-id` |
+| `gcloud compute ssh INSTANCE ...`            | `lily gcloud compute ssh INSTANCE ...`            |
+| `az ssh vm --resource-group RG --name VM`    | `lily azure ssh vm --resource-group RG --name VM` |
+| `az network bastion ssh ...`                 | `lily azure network bastion ssh ...`              |
+
+Commands already prefixed with `lily` are left unchanged (passthrough).
+
+### AWS EC2 Instance Connect
+
+`aws ec2-instance-connect ssh` is detected by the guard and rewritten, but does not support non-interactive command execution. When a command is specified, lily returns an error suggesting SSM instead:
+
+```bash
+# This will fail with a helpful error:
+lily aws ec2-instance-connect ssh --instance-id i-xxx --command "ps aux"
+# → Use 'lily aws ssm start-session --target i-xxx --command "CMD"' instead
+```
 
 ---
 
@@ -677,6 +745,14 @@ lily/
 │   ├── allowlist/              # YAML config parsing + execution limits
 │   │   ├── allowlist.go        #   Config struct, loading, defaults
 │   │   └── allowlist_test.go
+│   ├── cloud/                  # Cloud provider SSH (AWS, GCloud, Azure)
+│   │   ├── cloud.go            #   Provider execution, command parsing, shell
+│   │   └── cloud_test.go
+│   ├── guard/                  # Guard hooks (SSH + cloud CLI rewrite)
+│   │   ├── rewrite.go          #   Command rewrite logic
+│   │   ├── hook.go             #   Agent-specific hook runner
+│   │   ├── install.go          #   Hook install/uninstall
+│   │   └── *_test.go
 │   ├── install/                # Agent config install/uninstall
 │   │   ├── install.go          #   MCP config writing, config deployment
 │   │   └── install_test.go

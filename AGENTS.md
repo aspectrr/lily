@@ -4,6 +4,8 @@
 
 Lily MCP is a read-only remote command execution server for AI agents. It allows you to run diagnostic commands on remote hosts via SSH, with strict validation that prevents destructive operations.
 
+Lily also supports **cloud provider SSH** — wrapping AWS SSM, Google Cloud, and Azure CLI commands with the same read-only validation. Cloud CLI commands are intercepted by the guard and automatically rewritten to use lily.
+
 > **Note**: When the codebase changes, update `README.md`, `SECURITY.md`, and `SKILL.md` to reflect those changes.
 
 ## Quick Start
@@ -40,6 +42,11 @@ lily validate "rm -rf /"
 
 # Show config file location
 lily config-path
+
+# Cloud provider SSH
+lily aws ssm start-session --target i-12345 --command "ps aux"
+lily gcloud compute ssh my-instance --project P --zone us-central1-a --command "ps aux"
+lily azure ssh vm --resource-group MyRG --name MyVM --command "ps aux"
 ```
 
 ## MCP Tools
@@ -190,6 +197,68 @@ extra_blocked_flags:
 
 Config only **adds** to the base allowlist. Hardcoded restrictions (rm, sudo, bash, etc.) cannot be overridden.
 
+## Cloud Provider SSH
+
+Lily wraps cloud provider CLI commands with the same read-only validation used for SSH. This lets agents run diagnostic commands on cloud instances without needing SSH config entries.
+
+### AWS (SSM Session Manager)
+
+```bash
+# Run a single command
+lily aws ssm start-session --target i-0123456789abcdef0 --command "systemctl status nginx"
+
+# Interactive restricted shell
+lily aws ssm start-session --target i-0123456789abcdef0
+```
+
+Under the hood, lily uses `aws ssm send-command` with the `AWS-RunShellScript` document for non-interactive execution, and polls `get-command-invocation` for the result.
+
+**Note**: `aws ec2-instance-connect ssh` is detected by the guard but does not support non-interactive command execution. Use SSM instead.
+
+### Google Cloud
+
+```bash
+# Run a single command
+lily gcloud compute ssh my-instance --project my-project --zone us-central1-a --command "ps aux"
+
+# Via IAP tunnel (private IPs)
+lily gcloud compute ssh my-instance --tunnel-through-iap --command "df -h"
+
+# Interactive restricted shell
+lily gcloud compute ssh my-instance --project my-project --zone us-central1-a
+```
+
+Uses gcloud's native `--command` flag.
+
+### Azure
+
+```bash
+# Run a single command
+lily azure ssh vm --resource-group MyResourceGroup --name MyVM --command "uptime"
+
+# Via Azure Bastion
+lily azure network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /subscriptions/.../virtualMachines/MyVM --command "free -h"
+
+# Interactive restricted shell
+lily azure ssh vm --resource-group MyResourceGroup --name MyVM
+```
+
+Uses the `--` separator to pass commands to the underlying SSH session.
+
+### Guard Integration
+
+The guard automatically detects and rewrites raw cloud CLI SSH commands:
+
+```
+aws ssm start-session --target i-xxx        → lily aws ssm start-session --target i-xxx
+aws ec2-instance-connect ssh --instance-id  → lily aws ec2-instance-connect ssh --instance-id ...
+gcloud compute ssh INSTANCE ...             → lily gcloud compute ssh INSTANCE ...
+az ssh vm --resource-group RG --name VM     → lily azure ssh vm --resource-group RG --name VM
+az network bastion ssh ...                  → lily azure network bastion ssh ...
+```
+
+Commands already prefixed with `lily` are left unchanged (passthrough).
+
 ## Architecture
 
 ```
@@ -197,6 +266,8 @@ lily/
 ├── cmd/lily/main.go           # CLI entry point
 ├── internal/
 │   ├── allowlist/                  # YAML config parsing + execution limits
+│   ├── cloud/                      # Cloud provider SSH (AWS, GCloud, Azure)
+│   ├── guard/                      # Guard hooks (SSH + cloud CLI rewrite)
 │   ├── mcp/                        # MCP server, tools, rate limiter
 │   ├── readonly/                   # Command validation engine
 │   ├── sshconfig/                  # SSH config parser
@@ -211,6 +282,6 @@ lily/
 
 ```bash
 make build      # Build to bin/lily
-make test       # Run all tests (75 tests across 7 packages)
+make test       # Run all tests
 make install    # Install to /usr/local/bin
 ```

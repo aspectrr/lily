@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aspectrr/lily/internal/allowlist"
+	"github.com/aspectrr/lily/internal/cloud"
 	"github.com/aspectrr/lily/internal/guard"
 	"github.com/aspectrr/lily/internal/install"
 	"github.com/aspectrr/lily/internal/mcp"
@@ -36,6 +37,9 @@ Commands:
   list-commands          List all allowed commands
   config-path            Show the config file path
   validate-config        Validate the lily.yaml config file
+  aws <args...>          Run validated command on AWS instance via SSM
+  gcloud <args...>       Run validated command on GCP instance via gcloud
+  azure <args...>        Run validated command on Azure VM via az
   install-skill          Install lily into an agent's MCP config
   uninstall-skill        Remove lily from an agent's MCP config
   list-agents            Show detected agents that support MCP
@@ -56,6 +60,9 @@ Examples:
   lily hosts
   lily run web1 "systemctl status nginx"
   lily validate "rm -rf /"
+  lily aws ssm start-session --target i-xxx --command "ps aux"
+  lily gcloud compute ssh my-instance --project P --zone Z --command "ps aux"
+  lily azure ssh vm --resource-group RG --name VM --command "ps aux"
   lily install-skill claude-code
   lily install-skill all
   lily uninstall-skill cursor
@@ -168,6 +175,12 @@ func main() {
 		os.Exit(guard.RunHook(args[1]))
 	case "guard":
 		guardCmd(args[1:])
+	case "aws":
+		cloudCmd(cloud.AWS, args[1:], configFilePath, timeout)
+	case "gcloud":
+		cloudCmd(cloud.GCloud, args[1:], configFilePath, timeout)
+	case "azure":
+		cloudCmd(cloud.Azure, args[1:], configFilePath, timeout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		fmt.Print(usageText)
@@ -607,6 +620,57 @@ func guardStatus() {
 	}
 
 	fmt.Printf("\nUsage: lily guard install <agent>\n       lily guard install all\n")
+}
+
+// cloudCmd handles lily aws, lily gcloud, and lily azure CLI commands.
+// These wrap cloud provider SSH commands with lily's read-only validation.
+//
+// Usage:
+//
+//	lily aws ssm start-session --target i-xxx --command "ps aux"
+//	lily gcloud compute ssh INSTANCE --project P --zone Z --command "ps aux"
+//	lily azure ssh vm --resource-group RG --name VM --command "ps aux"
+//
+// Without --command, opens an interactive restricted shell.
+func cloudCmd(provider cloud.Provider, args []string, configFilePath string, timeout time.Duration) {
+	if len(args) == 0 {
+		switch provider {
+		case cloud.AWS:
+			fatal("usage: lily aws ssm start-session --target <instance-id> [--command \"<cmd>\"]")
+		case cloud.GCloud:
+			fatal("usage: lily gcloud compute ssh <INSTANCE> --project <P> --zone <Z> [--command \"<cmd>\"]")
+		case cloud.Azure:
+			fatal("usage: lily azure ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]")
+		}
+	}
+
+	cfg := loadConfig(configFilePath)
+	validator := readonly.NewValidator(cfg.ExtraCommands, cfg.SubcommandRestrictions(), cfg.BlockedFlags())
+	maxOutput := cfg.GetMaxOutputBytes()
+
+	// Parse --command from args
+	providerArgs, command := cloud.ParseCommand(args)
+
+	if command != "" {
+		// Single command mode: validate and execute
+		result, err := cloud.Run(context.Background(), provider, providerArgs, command, validator, timeout, maxOutput)
+		if err != nil {
+			fatal(err.Error())
+		}
+
+		if result.Stdout != "" {
+			fmt.Print(result.Stdout)
+		}
+		if result.Stderr != "" {
+			fmt.Fprintf(os.Stderr, "%s", result.Stderr)
+		}
+		os.Exit(result.ExitCode)
+	} else {
+		// Interactive restricted shell mode
+		if err := cloud.Shell(context.Background(), provider, providerArgs, validator, timeout, maxOutput); err != nil {
+			fatal(err.Error())
+		}
+	}
 }
 
 func isGuardInstalledInJSON(configPath string) bool {

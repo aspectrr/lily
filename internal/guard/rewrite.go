@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/aspectrr/lily/internal/cloud"
 )
 
 // RewriteResult is returned by Rewrite.
@@ -37,26 +39,87 @@ func Rewrite(command string) RewriteResult {
 		return RewriteResult{Decision: "passthrough"}
 	}
 
-	// Extract the first command token (handling env var prefixes like KEY=val ssh ...)
-	firstCmd := extractFirstCommand(command)
-	if firstCmd == "" {
-		return RewriteResult{Decision: "passthrough"}
-	}
+	// Split compound commands on shell operators and check each segment.
+	for _, segment := range splitShellOperators(command) {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
 
-	// Only interested in ssh, scp, and rsync -e ssh
-	switch firstCmd {
-	case "ssh":
-		return rewriteSSH(command)
-	case "scp":
-		return rewriteSCP(command)
-	default:
-		// Check for rsync -e ssh
-		if firstCmd == "rsync" && strings.Contains(command, "-e ssh") {
-			return rewriteRsync(command)
+		firstCmd := extractFirstCommand(segment)
+		if firstCmd == "" {
+			continue
+		}
+
+		switch firstCmd {
+		case "ssh":
+			return rewriteSSH(segment)
+		case "scp":
+			return rewriteSCP(segment)
+		default:
+			// Check for cloud CLI SSH commands (aws, gcloud, az)
+			if provider, rewritten, detected := cloud.DetectCloudSSH(segment); detected {
+				return RewriteResult{
+					Decision:  "rewrite",
+					Rewritten: rewritten,
+					Reason:    fmt.Sprintf("%s SSH command rewritten to lily (read-only command validation)", provider),
+				}
+			}
+
+			// Check for rsync -e ssh
+			if firstCmd == "rsync" && containsRsyncSSH(segment) {
+				return rewriteRsync(segment)
+			}
 		}
 	}
 
 	return RewriteResult{Decision: "passthrough"}
+}
+
+// splitShellOperators splits a command string on shell operator boundaries
+// (&&, ||, ;, |, &) while respecting single and double quotes.
+func splitShellOperators(s string) []string {
+	var segments []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+
+		switch {
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+			current.WriteByte(ch)
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+			current.WriteByte(ch)
+		case !inSingle && !inDouble:
+			// Check for shell operators
+			if ch == '&' && i+1 < len(s) && s[i+1] == '&' {
+				segments = append(segments, current.String())
+				current.Reset()
+				i++ // skip second '&'
+			} else if ch == '|' && i+1 < len(s) && s[i+1] == '|' {
+				segments = append(segments, current.String())
+				current.Reset()
+				i++ // skip second '|'
+			} else if ch == ';' || ch == '|' || ch == '&' {
+				segments = append(segments, current.String())
+				current.Reset()
+			} else {
+				current.WriteByte(ch)
+			}
+		default:
+			current.WriteByte(ch)
+		}
+	}
+
+	if current.Len() > 0 {
+		segments = append(segments, current.String())
+	}
+
+	return segments
 }
 
 // rewriteSSH handles ssh command patterns:
@@ -80,6 +143,8 @@ func rewriteSSH(command string) RewriteResult {
 		if i := strings.LastIndex(tok, "/"); i >= 0 {
 			base = tok[i+1:]
 		}
+		// Strip leading backslash shell escapes (\ssh → ssh)
+		base = strings.TrimLeft(base, "\\")
 		if base == "ssh" {
 			sshIdx = idx
 		}
@@ -212,6 +277,37 @@ func rewriteRsync(command string) RewriteResult {
 	}
 }
 
+// containsRsyncSSH checks whether an rsync command uses SSH as the remote shell.
+// It handles all flag forms: -e ssh, -essh, -e "ssh", --rsh=ssh, --rsh ssh.
+func containsRsyncSSH(command string) bool {
+	tokens := tokenize(command)
+	for i := 1; i < len(tokens); i++ {
+		tok := tokens[i]
+		var val string
+		switch {
+		case tok == "-e" && i+1 < len(tokens):
+			val = tokens[i+1]
+		case strings.HasPrefix(tok, "-e"):
+			val = strings.TrimPrefix(tok, "-e")
+		case strings.HasPrefix(tok, "--rsh="):
+			val = strings.TrimPrefix(tok, "--rsh=")
+		case tok == "--rsh" && i+1 < len(tokens):
+			val = tokens[i+1]
+		default:
+			continue
+		}
+		val = strings.Trim(val, "\"'")
+		base := val
+		if idx := strings.LastIndex(val, "/"); idx >= 0 {
+			base = val[idx+1:]
+		}
+		if base == "ssh" {
+			return true
+		}
+	}
+	return false
+}
+
 // extractFirstCommand returns the first command token from a shell command,
 // skipping any leading VAR=value environment variable assignments.
 func extractFirstCommand(command string) string {
@@ -225,6 +321,8 @@ func extractFirstCommand(command string) string {
 		if idx := strings.LastIndex(tok, "/"); idx >= 0 {
 			tok = tok[idx+1:]
 		}
+		// Strip leading backslash shell escapes (\ssh → ssh)
+		tok = strings.TrimLeft(tok, "\\")
 		return tok
 	}
 	return ""
@@ -288,8 +386,8 @@ func takesSSHArg(flag string) string {
 	}
 	lastChar := cleanFlag[len(cleanFlag)-1]
 	switch lastChar {
-	case 'p', 'i', 'o', 'l', 'F', 'E', 'e', 'I', 'J', 'L',
-		'M', 'O', 'Q', 'R', 'S', 'W', 'w', 'm', 'c':
+	case 'b', 'B', 'c', 'D', 'E', 'e', 'F', 'I', 'i', 'J', 'L',
+		'l', 'M', 'm', 'O', 'o', 'p', 'Q', 'R', 'S', 'W', 'w':
 		return string(lastChar)
 	}
 	return ""

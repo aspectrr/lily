@@ -156,3 +156,245 @@ func TestRewrite_SSHLoginFlag(t *testing.T) {
 		t.Fatalf("expected host web1, got %s", result.Host)
 	}
 }
+
+// ── Cloud CLI rewrite tests ────────────────────────────────────────
+
+func TestRewrite_AWSSSMStartSession(t *testing.T) {
+	result := Rewrite("aws ssm start-session --target i-12345")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily aws ssm start-session --target i-12345" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_AWSSSMWithCommand(t *testing.T) {
+	result := Rewrite("aws ssm start-session --target i-12345 --command 'ps aux'")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily aws ssm start-session --target i-12345 --command 'ps aux'" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_AWSEC2InstanceConnect(t *testing.T) {
+	result := Rewrite("aws ec2-instance-connect ssh --instance-id i-12345")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily aws ec2-instance-connect ssh --instance-id i-12345" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_AWSOtherCommand(t *testing.T) {
+	result := Rewrite("aws s3 ls")
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough for aws s3 ls, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_AWSSSMSendCommand(t *testing.T) {
+	// aws ssm send-command is not detected by the guard (only start-session and ec2-instance-connect ssh)
+	result := Rewrite("aws ssm send-command --instance-ids i-12345 --document-name AWS-RunShellScript")
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough for aws ssm send-command, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_GCloudComputeSSH(t *testing.T) {
+	result := Rewrite("gcloud compute ssh my-instance --project my-project --zone us-central1-a")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily gcloud compute ssh my-instance --project my-project --zone us-central1-a" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_GCloudComputeSSHWithCommand(t *testing.T) {
+	result := Rewrite(`gcloud compute ssh my-instance --project P --zone Z --command "ps aux"`)
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_GCloudOtherCommand(t *testing.T) {
+	result := Rewrite("gcloud compute instances list")
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough for gcloud compute instances list, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_GCloudConfig(t *testing.T) {
+	result := Rewrite("gcloud config set project my-project")
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough for gcloud config, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_AzureSSHVM(t *testing.T) {
+	result := Rewrite("az ssh vm --resource-group MyRG --name MyVM")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily azure ssh vm --resource-group MyRG --name MyVM" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_AzureSSHVMWithCommand(t *testing.T) {
+	result := Rewrite("az ssh vm --resource-group RG --name VM -- ps aux")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily azure ssh vm --resource-group RG --name VM -- ps aux" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_AzureBastionSSH(t *testing.T) {
+	result := Rewrite("az network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /subscriptions/sub/virtualMachines/MyVM")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily azure network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /subscriptions/sub/virtualMachines/MyVM" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_AzureOtherCommand(t *testing.T) {
+	result := Rewrite("az vm list")
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough for az vm list, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_AzureVMStart(t *testing.T) {
+	result := Rewrite("az vm start --resource-group RG --name MyVM")
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough for az vm start, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_LilyCloudPassthrough(t *testing.T) {
+	// Already using lily — should be passthrough
+	tests := []string{
+		"lily aws ssm start-session --target i-12345",
+		"lily gcloud compute ssh my-instance --project P --zone Z",
+		"lily azure ssh vm --resource-group RG --name VM",
+	}
+	for _, cmd := range tests {
+		result := Rewrite(cmd)
+		if result.Decision != "passthrough" {
+			t.Fatalf("expected passthrough for %q, got %s", cmd, result.Decision)
+		}
+	}
+}
+
+// ── PR #5 reviewer fix tests ────────────────────────────────────────
+
+// Issue 3: Compound command bypass (&&, ;, ||, |)
+func TestRewrite_CompoundCommand(t *testing.T) {
+	tests := []struct {
+		cmd      string
+		decision string
+	}{
+		{"echo test && ssh web1 cat /etc/shadow", "rewrite"},
+		{"true; ssh web1 cat /etc/shadow", "rewrite"},
+		{"echo test || ssh web1 cat /etc/shadow", "rewrite"},
+		{"echo test | ssh web1 cat /etc/shadow", "rewrite"},
+		{"echo test & ssh web1 cat /etc/shadow", "rewrite"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cmd, func(t *testing.T) {
+			result := Rewrite(tt.cmd)
+			if result.Decision != tt.decision {
+				t.Fatalf("expected %s, got %s", tt.decision, result.Decision)
+			}
+		})
+	}
+}
+
+// Issue 3: Compound command with scp/rsync
+func TestRewrite_CompoundCommandSCP(t *testing.T) {
+	result := Rewrite("echo test && scp file web1:/tmp/")
+	if result.Decision != "block" {
+		t.Fatalf("expected block, got %s", result.Decision)
+	}
+}
+
+// Issue 4: Backslash escape bypass
+func TestRewrite_BackslashEscape(t *testing.T) {
+	result := Rewrite("\\ssh web1 cat /etc/shadow")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Host != "web1" {
+		t.Fatalf("expected host web1, got %s", result.Host)
+	}
+}
+
+// Issue 5: rsync -e variants
+func TestRewrite_RsyncSSHVariants(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+	}{
+		{"quoted ssh", `rsync -avz -e "ssh" ./src/ web1:/opt/app/`},
+		{"single quoted ssh", "rsync -avz -e 'ssh' ./src/ web1:/opt/app/"},
+		{"no space", "rsync -avz -essh ./src/ web1:/opt/app/"},
+		{"rsh equals", "rsync -avz --rsh=ssh ./src/ web1:/opt/app/"},
+		{"rsh space", "rsync -avz --rsh ssh ./src/ web1:/opt/app/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := Rewrite(tt.cmd)
+			if result.Decision != "block" {
+				t.Fatalf("expected block for %q, got %s", tt.cmd, result.Decision)
+			}
+		})
+	}
+}
+
+// Issue 6: -D, -b, -B flags should not be treated as hostname
+func TestRewrite_SSHMissingFlags(t *testing.T) {
+	tests := []struct {
+		cmd  string
+		host string
+	}{
+		{"ssh -D 8080 web1 ls", "web1"},
+		{"ssh -b 10.0.0.1 web1 ls", "web1"},
+		{"ssh -B eth0 web1 ls", "web1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cmd, func(t *testing.T) {
+			result := Rewrite(tt.cmd)
+			if result.Decision != "rewrite" {
+				t.Fatalf("expected rewrite, got %s", result.Decision)
+			}
+			if result.Host != tt.host {
+				t.Fatalf("expected host %q, got %q", tt.host, result.Host)
+			}
+		})
+	}
+}
+
+// Verify that quoting in compound commands is respected
+func TestRewrite_CompoundCommandWithQuotes(t *testing.T) {
+	// ssh mentioned inside a quoted string should NOT trigger detection
+	result := Rewrite(`echo "use ssh to connect" && ls`)
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough for quoted ssh mention, got %s", result.Decision)
+	}
+}
+
+// Ensure quoted compound commands don't false-positive
+func TestRewrite_SSHInsideQuotedArg(t *testing.T) {
+	result := Rewrite(`echo "ssh is a protocol" && ls`)
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough, got %s", result.Decision)
+	}
+}

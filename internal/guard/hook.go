@@ -182,6 +182,10 @@ func writeJSON(v any) {
 		fmt.Fprintf(os.Stderr, "[lily guard] warning: could not marshal JSON: %s\n", err)
 		return
 	}
-	os.Stdout.Write(data)
-	os.Stdout.Write([]byte("\n"))
+	if _, err := os.Stdout.Write(data); err != nil {
+		fmt.Fprintf(os.Stderr, "[lily guard] warning: could not write to stdout: %s\n", err)
+	}
+	if _, err := os.Stdout.Write([]byte("\n")); err != nil {
+		fmt.Fprintf(os.Stderr, "[lily guard] warning: could not write newline to stdout: %s\n", err)
+	}
 }

@@ -10,9 +10,9 @@ import (
 
 // GuardTarget describes an agent that lily guard can be installed into.
 type GuardTarget struct {
-	Name         string // e.g., "claude-code", "cursor", "pi"
+	Name         string // e.g., "claude-code", "cursor"
 	ConfigPath   string // Absolute path to the agent's config file
-	ConfigFormat string // "claude-settings", "cursor-hooks", "pi-extension"
+	ConfigFormat string // "claude-settings", "cursor-hooks"
 }
 
 // GuardTargets returns all known guard targets on this system.
@@ -37,11 +37,6 @@ func GuardTargets() []GuardTarget {
 			Name:         "cursor",
 			ConfigPath:   filepath.Join(home, ".cursor", "hooks.json"),
 			ConfigFormat: "cursor-hooks",
-		},
-		{
-			Name:         "pi",
-			ConfigPath:   filepath.Join(home, ".pi", "agent", "extensions", "lily-guard.ts"),
-			ConfigFormat: "pi-extension",
 		},
 	}
 }
@@ -78,8 +73,7 @@ func InstallGuard(target GuardTarget, binaryPath string) error {
 		return installCodexGuard(target.ConfigPath, binaryPath)
 	case "cursor-hooks":
 		return installCursorGuard(target.ConfigPath, binaryPath)
-	case "pi-extension":
-		return installPiGuard(target.ConfigPath, binaryPath)
+
 	default:
 		return fmt.Errorf("unknown config format: %s", target.ConfigFormat)
 	}
@@ -94,8 +88,7 @@ func UninstallGuard(target GuardTarget) error {
 		return uninstallCodexGuard(target.ConfigPath)
 	case "cursor-hooks":
 		return uninstallCursorGuard(target.ConfigPath)
-	case "pi-extension":
-		return uninstallPiGuard(target.ConfigPath)
+
 	default:
 		return fmt.Errorf("unknown config format: %s", target.ConfigFormat)
 	}
@@ -414,60 +407,6 @@ func uninstallCursorGuard(configPath string) error {
 	}
 
 	return writeJSONFile(configPath, cfg)
-}
-
-// ── Pi ───────────────────────────────────────────────────────────────
-
-const piExtensionTemplate = `// lily-guard — Automatically installed by "lily guard install pi"
-// Intercepts bash tool calls containing SSH and rewrites them to use lily run.
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
-
-export default function (pi: ExtensionAPI) {
-  pi.on("tool_call", async (event, ctx) => {
-    if (!isToolCallEventType("bash", event)) return;
-    const cmd = event.input.command ?? "";
-    if (!cmd) return;
-
-    // Quick check: only run if the command mentions ssh/scp/rsync
-    if (!/\b(ssh|scp|rsync)\b/.test(cmd)) return;
-
-    const result = await pi.exec("{{BINARY}}", ["rewrite", cmd], { timeout: 10 });
-    if (result.code === null || result.code !== 0) return;
-
-    const rewritten = result.stdout.trim();
-    if (!rewritten || rewritten === cmd) return;
-
-    // Mutate the command in-place before execution
-    event.input.command = rewritten;
-  });
-}
-`
-
-func installPiGuard(configPath, binaryPath string) error {
-	// Check if already installed
-	if _, err := os.Stat(configPath); err == nil {
-		fmt.Printf("  lily guard already installed in pi (%s)\n", configPath)
-		return nil
-	}
-
-	// Ensure parent directory exists
-	dir := filepath.Dir(configPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create directory %s: %w", dir, err)
-	}
-
-	content := piExtensionTemplate
-	content = replaceAll(content, "{{BINARY}}", binaryPath)
-
-	return os.WriteFile(configPath, []byte(content), 0644)
-}
-
-func uninstallPiGuard(configPath string) error {
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return nil
-	}
-	return os.Remove(configPath)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

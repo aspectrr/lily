@@ -1,0 +1,439 @@
+package cloud
+
+import (
+	"testing"
+)
+
+func TestParseCommand_CommandFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantArgs    []string
+		wantCommand string
+	}{
+		{
+			name:        "no command",
+			args:        []string{"ssm", "start-session", "--target", "i-xxx"},
+			wantArgs:    []string{"ssm", "start-session", "--target", "i-xxx"},
+			wantCommand: "",
+		},
+		{
+			name:        "--command flag",
+			args:        []string{"ssm", "start-session", "--target", "i-xxx", "--command", "ps aux"},
+			wantArgs:    []string{"ssm", "start-session", "--target", "i-xxx"},
+			wantCommand: "ps aux",
+		},
+		{
+			name:        "--command=value form",
+			args:        []string{"compute", "ssh", "my-instance", "--command=ps aux"},
+			wantArgs:    []string{"compute", "ssh", "my-instance"},
+			wantCommand: "ps aux",
+		},
+		{
+			name:        "command at start",
+			args:        []string{"--command", "uptime", "compute", "ssh", "my-instance"},
+			wantArgs:    []string{"compute", "ssh", "my-instance"},
+			wantCommand: "uptime",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args, cmd := ParseCommand(tt.args)
+			if cmd != tt.wantCommand {
+				t.Errorf("ParseCommand() command = %q, want %q", cmd, tt.wantCommand)
+			}
+			if len(args) != len(tt.wantArgs) {
+				t.Errorf("ParseCommand() args = %v, want %v", args, tt.wantArgs)
+				return
+			}
+			for i, arg := range args {
+				if arg != tt.wantArgs[i] {
+					t.Errorf("ParseCommand() args[%d] = %q, want %q", i, arg, tt.wantArgs[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseCommand_DashDashSeparator(t *testing.T) {
+	args, cmd := ParseCommand([]string{"ssh", "vm", "--resource-group", "RG", "--name", "VM", "--", "ps aux"})
+	if cmd != "ps aux" {
+		t.Errorf("expected command 'ps aux', got %q", cmd)
+	}
+	expectedArgs := []string{"ssh", "vm", "--resource-group", "RG", "--name", "VM"}
+	if len(args) != len(expectedArgs) {
+		t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(args), args)
+	}
+	for i, arg := range args {
+		if arg != expectedArgs[i] {
+			t.Errorf("args[%d] = %q, want %q", i, arg, expectedArgs[i])
+		}
+	}
+}
+
+func TestParseCommand_DashDashNoCommand(t *testing.T) {
+	args, cmd := ParseCommand([]string{"ssh", "vm", "--"})
+	if cmd != "" {
+		t.Errorf("expected empty command, got %q", cmd)
+	}
+	// With nothing after --, the -- is left in args since there's no command to extract
+	if len(args) != 3 || args[0] != "ssh" || args[1] != "vm" || args[2] != "--" {
+		t.Errorf("expected [ssh vm --], got %v", args)
+	}
+}
+
+func TestParseCommand_ParametersJSON(t *testing.T) {
+	providerArgs, cmd := ParseCommand([]string{
+		"ssm", "start-session",
+		"--target", "i-xxx",
+		"--parameters", `{"commands":["ps aux"]}`,
+	})
+	if cmd != "ps aux" {
+		t.Errorf("expected command 'ps aux', got %q", cmd)
+	}
+	// Should have removed --parameters and its value
+	for _, arg := range providerArgs {
+		if arg == "--parameters" || arg == `{"commands":["ps aux"]}` {
+			t.Errorf("--parameters should have been removed, found: %q", arg)
+		}
+	}
+}
+
+func TestParseCommand_ParametersJSONSingleKey(t *testing.T) {
+	providerArgs, cmd := ParseCommand([]string{
+		"ssm", "send-command",
+		"--instance-ids", "i-xxx",
+		"--parameters", `{"command":["systemctl status nginx"]}`,
+	})
+	if cmd != "systemctl status nginx" {
+		t.Errorf("expected command 'systemctl status nginx', got %q", cmd)
+	}
+	for _, arg := range providerArgs {
+		if arg == "--parameters" {
+			t.Errorf("--parameters should have been removed")
+		}
+	}
+}
+
+func TestParseCommand_ParametersInvalidJSON(t *testing.T) {
+	providerArgs, cmd := ParseCommand([]string{
+		"ssm", "start-session",
+		"--parameters", "not-json",
+	})
+	if cmd != "" {
+		t.Errorf("expected empty command for invalid JSON, got %q", cmd)
+	}
+	if len(providerArgs) != 4 {
+		t.Errorf("expected args to be unchanged, got %v", providerArgs)
+	}
+}
+
+func TestParseCommand_CommandFlagTakesPrecedenceOverDashDash(t *testing.T) {
+	_, cmd := ParseCommand([]string{
+		"ssh", "vm",
+		"--command", "ps aux",
+		"--", "systemctl status nginx",
+	})
+	if cmd != "ps aux" {
+		t.Errorf("expected --command to take precedence, got %q", cmd)
+	}
+}
+
+func TestParseCommand_CommandFlagTakesPrecedenceOverParameters(t *testing.T) {
+	_, cmd := ParseCommand([]string{
+		"ssm", "start-session",
+		"--command", "uptime",
+		"--parameters", `{"commands":["ps aux"]}`,
+	})
+	if cmd != "uptime" {
+		t.Errorf("expected --command to take precedence, got %q", cmd)
+	}
+}
+
+func TestProviderBinary(t *testing.T) {
+	tests := []struct {
+		provider Provider
+		binary   string
+	}{
+		{AWS, "aws"},
+		{GCloud, "gcloud"},
+		{Azure, "az"},
+	}
+	for _, tt := range tests {
+		if got := providerBinary(tt.provider); got != tt.binary {
+			t.Errorf("providerBinary(%s) = %q, want %q", tt.provider, got, tt.binary)
+		}
+	}
+}
+
+func TestExtractIdentifier(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider Provider
+		args     []string
+		want     string
+	}{
+		{
+			name:     "aws ssm --target",
+			provider: AWS,
+			args:     []string{"ssm", "start-session", "--target", "i-12345"},
+			want:     "i-12345",
+		},
+		{
+			name:     "aws ssm --instance-id",
+			provider: AWS,
+			args:     []string{"ssm", "start-session", "--instance-id", "i-67890"},
+			want:     "i-67890",
+		},
+		{
+			name:     "aws fallback",
+			provider: AWS,
+			args:     []string{"ssm", "start-session"},
+			want:     "aws",
+		},
+		{
+			name:     "gcloud compute ssh instance name",
+			provider: GCloud,
+			args:     []string{"compute", "ssh", "my-instance", "--project", "P", "--zone", "Z"},
+			want:     "my-instance",
+		},
+		{
+			name:     "gcloud fallback",
+			provider: GCloud,
+			args:     []string{"compute", "ssh", "--project", "P"},
+			want:     "gcloud",
+		},
+		{
+			name:     "azure --name",
+			provider: Azure,
+			args:     []string{"ssh", "vm", "--resource-group", "RG", "--name", "MyVM"},
+			want:     "MyVM",
+		},
+		{
+			name:     "azure --resource-group fallback",
+			provider: Azure,
+			args:     []string{"ssh", "vm", "--resource-group", "RG"},
+			want:     "RG",
+		},
+		{
+			name:     "azure fallback",
+			provider: Azure,
+			args:     []string{"ssh", "vm"},
+			want:     "azure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractIdentifier(tt.provider, tt.args)
+			if got != tt.want {
+				t.Errorf("extractIdentifier() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractFlagValue(t *testing.T) {
+	tests := []struct {
+		args []string
+		flag string
+		want string
+	}{
+		{[]string{"--target", "i-xxx"}, "--target", "i-xxx"},
+		{[]string{"--target=i-yyy"}, "--target", "i-yyy"},
+		{[]string{"--target"}, "--target", ""},
+		{[]string{"--other", "value"}, "--target", ""},
+		{[]string{"--project", "my-project", "--zone", "us-east1"}, "--zone", "us-east1"},
+	}
+
+	for _, tt := range tests {
+		got := extractFlagValue(tt.args, tt.flag)
+		if got != tt.want {
+			t.Errorf("extractFlagValue(%v, %q) = %q, want %q", tt.args, tt.flag, got, tt.want)
+		}
+	}
+}
+
+func TestEscapeJSONString(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"simple", "simple"},
+		{"has spaces", "has spaces"},
+		{`has "quotes"`, `has \"quotes\"`},
+		{"has\nnewline", "has\\nnewline"},
+		{"has\\backslash", "has\\\\backslash"},
+	}
+
+	for _, tt := range tests {
+		got := escapeJSONString(tt.input)
+		if got != tt.want {
+			t.Errorf("escapeJSONString(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// ── DetectCloudSSH tests ──────────────────────────────────────────────
+
+func TestDetectCloudSSH_AWSSSM(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("aws ssm start-session --target i-12345")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if provider != AWS {
+		t.Fatalf("expected AWS provider, got %s", provider)
+	}
+	if rewritten != "lily aws ssm start-session --target i-12345" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_AWSEC2InstanceConnect(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("aws ec2-instance-connect ssh --instance-id i-12345")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if provider != AWS {
+		t.Fatalf("expected AWS provider, got %s", provider)
+	}
+	if rewritten != "lily aws ec2-instance-connect ssh --instance-id i-12345" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_AWSOtherCommand(t *testing.T) {
+	_, _, detected := DetectCloudSSH("aws s3 ls")
+	if detected {
+		t.Fatal("aws s3 ls should not be detected as cloud SSH")
+	}
+}
+
+func TestDetectCloudSSH_GCloudComputeSSH(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("gcloud compute ssh my-instance --project my-project --zone us-central1-a")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if provider != GCloud {
+		t.Fatalf("expected GCloud provider, got %s", provider)
+	}
+	if rewritten != "lily gcloud compute ssh my-instance --project my-project --zone us-central1-a" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_GCloudOtherCommand(t *testing.T) {
+	_, _, detected := DetectCloudSSH("gcloud compute instances list")
+	if detected {
+		t.Fatal("gcloud compute instances list should not be detected")
+	}
+}
+
+func TestDetectCloudSSH_AzureSSHVM(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("az ssh vm --resource-group MyRG --name MyVM")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if provider != Azure {
+		t.Fatalf("expected Azure provider, got %s", provider)
+	}
+	if rewritten != "lily azure ssh vm --resource-group MyRG --name MyVM" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_AzureBastion(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("az network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /sub/VM")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if provider != Azure {
+		t.Fatalf("expected Azure provider, got %s", provider)
+	}
+	if rewritten != "lily azure network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /sub/VM" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_AzureOtherCommand(t *testing.T) {
+	_, _, detected := DetectCloudSSH("az vm list")
+	if detected {
+		t.Fatal("az vm list should not be detected")
+	}
+}
+
+func TestDetectCloudSSH_Passthrough(t *testing.T) {
+	tests := []string{
+		"ls -la",
+		"git status",
+		"docker ps",
+		"",
+		"make build",
+	}
+	for _, cmd := range tests {
+		_, _, detected := DetectCloudSSH(cmd)
+		if detected {
+			t.Fatalf("expected passthrough for %q", cmd)
+		}
+	}
+}
+
+func TestDetectCloudSSH_WithPathPrefix(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("/usr/local/bin/aws ssm start-session --target i-xxx")
+	if !detected {
+		t.Fatal("expected detection with path prefix")
+	}
+	if provider != AWS {
+		t.Fatalf("expected AWS, got %s", provider)
+	}
+	if rewritten != "lily /usr/local/bin/aws ssm start-session --target i-xxx" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_GCloudWithCommand(t *testing.T) {
+	_, rewritten, detected := DetectCloudSSH("gcloud compute ssh my-instance --project P --zone Z --command 'ps aux'")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if rewritten != "lily gcloud compute ssh my-instance --project P --zone Z --command 'ps aux'" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_AzureWithDashDash(t *testing.T) {
+	_, rewritten, detected := DetectCloudSSH("az ssh vm --resource-group RG --name VM -- ps aux")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if rewritten != "lily azure ssh vm --resource-group RG --name VM -- ps aux" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestTokenizeCommand(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"aws ssm start-session --target i-xxx", []string{"aws", "ssm", "start-session", "--target", "i-xxx"}},
+		{`gcloud compute ssh INSTANCE --command "ps aux"`, []string{"gcloud", "compute", "ssh", "INSTANCE", "--command", "ps aux"}},
+		{"az ssh vm --name 'My VM'", []string{"az", "ssh", "vm", "--name", "My VM"}},
+		{"", nil},
+		{"  ", nil},
+	}
+
+	for _, tt := range tests {
+		got := tokenizeCommand(tt.input)
+		if len(got) != len(tt.want) {
+			t.Errorf("tokenizeCommand(%q) = %v, want %v", tt.input, got, tt.want)
+			continue
+		}
+		for i, tok := range got {
+			if tok != tt.want[i] {
+				t.Errorf("tokenizeCommand(%q)[%d] = %q, want %q", tt.input, i, tok, tt.want[i])
+			}
+		}
+	}
+}
