@@ -11,3 +11,4 @@ dist/
 site/node_modules/
 site/dist/
 site/.astro/
+.DS_Store

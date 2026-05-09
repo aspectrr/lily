@@ -16,17 +16,12 @@ import (
 // Shell provides a restricted interactive SSH session where every command
 // is validated through lily's read-only allowlist before execution.
 // It reads commands from stdin line by line, validates them, and executes
-// the allowed ones on the remote host.
+// the allowed ones on the remote host over a single persistent SSH connection.
 type Shell struct {
 	hosts    []sshconfig.Host
 	exec     *sshexec.Executor
 	validate *readonly.Validator
-	timeout  TimeoutFunc
 }
-
-// TimeoutFunc returns the per-command timeout. Extracted as a function
-// so the caller can control it (e.g., from CLI flags).
-type TimeoutFunc func() int
 
 // NewShell creates a restricted SSH shell.
 func NewShell(
@@ -41,9 +36,10 @@ func NewShell(
 	}
 }
 
-// Run starts the restricted shell loop. It reads commands from stdin,
-// validates each one, and executes allowed commands on the remote host.
-// It exits when stdin is closed (EOF) or the user types "exit" / "quit".
+// Run starts the restricted shell loop. It establishes a single persistent SSH
+// connection, then reads commands from stdin, validates each one, and executes
+// allowed commands over that connection. It exits when stdin is closed (EOF)
+// or the user types "exit" / "quit".
 func (s *Shell) Run(ctx context.Context, hostName string) error {
 	host := sshconfig.LookupHost(s.hosts, hostName)
 	if host == nil {
@@ -54,6 +50,13 @@ func (s *Shell) Run(ctx context.Context, hostName string) error {
 	if displayHost == "" {
 		displayHost = host.Host
 	}
+
+	// Dial once — persistent connection reused for all commands.
+	client, err := s.exec.Dial(ctx, hostName)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer client.Close()
 
 	fmt.Fprintf(os.Stderr, "lily ssh: connected to %s (%s)\n", hostName, displayHost)
 	fmt.Fprintf(os.Stderr, "  Every command is validated through lily's read-only allowlist.\n")
@@ -98,8 +101,8 @@ func (s *Shell) Run(ctx context.Context, hostName string) error {
 			continue
 		}
 
-		// Execute on the remote host
-		result, err := s.exec.Run(ctx, hostName, safeCommand)
+		// Execute on the remote host over the persistent connection
+		result, err := client.RunOnClient(ctx, safeCommand)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %s\n", err)
 			continue

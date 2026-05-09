@@ -39,6 +39,15 @@ type Executor struct {
 	maxOutputBytes int64
 }
 
+// PersistentClient holds an open SSH connection that can be reused across
+// multiple command executions. Create one with Executor.Dial, run commands
+// with RunOnClient, and clean up with Close.
+type PersistentClient struct {
+	client         sshClient
+	timeout        time.Duration
+	maxOutputBytes int64
+}
+
 // NewExecutor creates a new SSH executor with the given host entries and output limit.
 func NewExecutor(hosts []sshconfig.Host, timeout time.Duration, maxOutputBytes int64) *Executor {
 	if timeout == 0 {
@@ -106,6 +115,79 @@ func (e *Executor) Run(ctx context.Context, hostName string, command string) (*R
 		}
 		return result, nil
 	}
+}
+
+// Dial establishes a persistent SSH connection to the given host and returns
+// a PersistentClient that can be reused for multiple command executions.
+// Call PersistentClient.Close when done.
+func (e *Executor) Dial(ctx context.Context, hostName string) (*PersistentClient, error) {
+	host := sshconfig.LookupHost(e.hosts, hostName)
+	if host == nil {
+		return nil, fmt.Errorf("host %q not found in SSH config", hostName)
+	}
+
+	client, err := e.dial(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("SSH connect to %s: %w", hostName, err)
+	}
+
+	return &PersistentClient{
+		client:         client,
+		timeout:        e.timeout,
+		maxOutputBytes: e.maxOutputBytes,
+	}, nil
+}
+
+// RunOnClient executes a command on the remote host using an existing
+// persistent connection. Each call creates a new SSH session but reuses
+// the underlying TCP connection and authentication.
+func (pc *PersistentClient) RunOnClient(ctx context.Context, command string) (*Result, error) {
+	session, err := pc.client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("SSH session: %w", err)
+	}
+	defer session.Close()
+
+	var stdout, stderr limitedBuffer
+	stdout.limit = pc.maxOutputBytes
+	stderr.limit = pc.maxOutputBytes
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+
+	ctx, cancel := context.WithTimeout(ctx, pc.timeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Run(command)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("command timed out after %s", pc.timeout)
+	case err := <-done:
+		result := &Result{
+			Stdout:    stdout.String(),
+			Stderr:    stderr.String(),
+			Truncated: stdout.truncated || stderr.truncated,
+		}
+		if err != nil {
+			if exitErr, ok := err.(*ssh.ExitError); ok {
+				result.ExitCode = exitErr.ExitStatus()
+			} else {
+				return nil, fmt.Errorf("command execution: %w", err)
+			}
+		}
+		return result, nil
+	}
+}
+
+// Close shuts down the persistent SSH connection.
+func (pc *PersistentClient) Close() error {
+	if pc.client != nil {
+		return pc.client.Close()
+	}
+	return nil
 }
 
 // sshClient is the interface for SSH client operations used by Executor.
