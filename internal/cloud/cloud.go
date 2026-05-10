@@ -645,36 +645,49 @@ func DetectCloudSSH(command string) (provider Provider, rewritten string, detect
 }
 
 func detectAWSCloudSSH(command string, tokens []string) (Provider, string, bool) {
-	// aws ssm start-session
-	if len(tokens) >= 3 && tokens[1] == "ssm" && tokens[2] == "start-session" {
-		return AWS, "lily " + command, true
-	}
-	// aws ec2-instance-connect ssh
-	if len(tokens) >= 3 && tokens[1] == "ec2-instance-connect" && tokens[2] == "ssh" {
-		return AWS, "lily " + command, true
+	// Scan tokens for subcommand pattern at any position to prevent
+	// bypass via global CLI flags (e.g., "aws --profile admin ssm start-session").
+	for i := 1; i < len(tokens); i++ {
+		// aws ssm start-session
+		if tokens[i] == "ssm" && i+1 < len(tokens) && tokens[i+1] == "start-session" {
+			return AWS, "lily " + command, true
+		}
+		// aws ec2-instance-connect ssh
+		if tokens[i] == "ec2-instance-connect" && i+1 < len(tokens) && tokens[i+1] == "ssh" {
+			return AWS, "lily " + command, true
+		}
 	}
 	return "", "", false
 }
 
 func detectGCloudCloudSSH(command string, tokens []string) (Provider, string, bool) {
-	// gcloud compute ssh
-	if len(tokens) >= 3 && tokens[1] == "compute" && tokens[2] == "ssh" {
-		return GCloud, "lily " + command, true
+	// Scan tokens for subcommand pattern at any position to prevent
+	// bypass via global CLI flags (e.g., "gcloud --project P compute ssh INSTANCE").
+	for i := 1; i < len(tokens); i++ {
+		// gcloud compute ssh
+		if tokens[i] == "compute" && i+1 < len(tokens) && tokens[i+1] == "ssh" {
+			return GCloud, "lily " + command, true
+		}
 	}
 	return "", "", false
 }
 
 func detectAzureCloudSSH(command string, tokens []string) (Provider, string, bool) {
-	// az ssh vm
-	if len(tokens) >= 3 && tokens[1] == "ssh" && tokens[2] == "vm" {
-		// Replace "az" with "lily azure"
-		rest := strings.Join(tokens[1:], " ")
-		return Azure, "lily azure " + rest, true
-	}
-	// az network bastion ssh
-	if len(tokens) >= 4 && tokens[1] == "network" && tokens[2] == "bastion" && tokens[3] == "ssh" {
-		rest := strings.Join(tokens[1:], " ")
-		return Azure, "lily azure " + rest, true
+	// Scan tokens for subcommand pattern at any position to prevent
+	// bypass via global CLI flags (e.g., "az --output json ssh vm").
+	// Replace "az" with "lily azure" in the original command string to
+	// preserve quoting of arguments (e.g., --resource-group "My RG").
+	for i := 1; i < len(tokens); i++ {
+		// az ssh vm
+		if tokens[i] == "ssh" && i+1 < len(tokens) && tokens[i+1] == "vm" {
+			idx := strings.Index(command, tokens[0])
+			return Azure, "lily azure" + command[idx+len(tokens[0]):], true
+		}
+		// az network bastion ssh
+		if tokens[i] == "network" && i+2 < len(tokens) && tokens[i+1] == "bastion" && tokens[i+2] == "ssh" {
+			idx := strings.Index(command, tokens[0])
+			return Azure, "lily azure" + command[idx+len(tokens[0]):], true
+		}
 	}
 	return "", "", false
 }

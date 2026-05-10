@@ -412,6 +412,154 @@ func TestDetectCloudSSH_AzureWithDashDash(t *testing.T) {
 	}
 }
 
+// ── Guard bypass regression tests (PR #5) ──────────────────────────────
+
+func TestDetectCloudSSH_AWSWithGlobalFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "--profile flag before ssm",
+			input: "aws --profile admin ssm start-session --target i-xxx",
+			want:  "lily aws --profile admin ssm start-session --target i-xxx",
+		},
+		{
+			name:  "--region flag before ssm",
+			input: "aws --region us-east-1 ssm start-session --target i-12345",
+			want:  "lily aws --region us-east-1 ssm start-session --target i-12345",
+		},
+		{
+			name:  "--output json before ec2-instance-connect",
+			input: "aws --output json ec2-instance-connect ssh --instance-id i-xxx",
+			want:  "lily aws --output json ec2-instance-connect ssh --instance-id i-xxx",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, rewritten, detected := DetectCloudSSH(tt.input)
+			if !detected {
+				t.Fatal("expected detection")
+			}
+			if provider != AWS {
+				t.Fatalf("expected AWS provider, got %s", provider)
+			}
+			if rewritten != tt.want {
+				t.Fatalf("unexpected rewrite: %s", rewritten)
+			}
+		})
+	}
+}
+
+func TestDetectCloudSSH_GCloudWithGlobalFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "--project flag before compute",
+			input: "gcloud --project my-project compute ssh my-instance --zone us-central1-a",
+			want:  "lily gcloud --project my-project compute ssh my-instance --zone us-central1-a",
+		},
+		{
+			name:  "--verbosity flag before compute",
+			input: "gcloud --verbosity debug compute ssh my-instance --project P --zone Z",
+			want:  "lily gcloud --verbosity debug compute ssh my-instance --project P --zone Z",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, rewritten, detected := DetectCloudSSH(tt.input)
+			if !detected {
+				t.Fatal("expected detection")
+			}
+			if provider != GCloud {
+				t.Fatalf("expected GCloud provider, got %s", provider)
+			}
+			if rewritten != tt.want {
+				t.Fatalf("unexpected rewrite: %s", rewritten)
+			}
+		})
+	}
+}
+
+func TestDetectCloudSSH_AzureWithGlobalFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "--output json before ssh vm",
+			input: "az --output json ssh vm --resource-group MyRG --name MyVM",
+			want:  "lily azure --output json ssh vm --resource-group MyRG --name MyVM",
+		},
+		{
+			name:  "--subscription flag before network bastion ssh",
+			input: "az --subscription sub-123 network bastion ssh --name B --resource-group RG",
+			want:  "lily azure --subscription sub-123 network bastion ssh --name B --resource-group RG",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, rewritten, detected := DetectCloudSSH(tt.input)
+			if !detected {
+				t.Fatal("expected detection")
+			}
+			if provider != Azure {
+				t.Fatalf("expected Azure provider, got %s", provider)
+			}
+			if rewritten != tt.want {
+				t.Fatalf("unexpected rewrite: %s", rewritten)
+			}
+		})
+	}
+}
+
+func TestDetectCloudSSH_AzureQuotedArgsPreserved(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "double-quoted resource group with spaces",
+			input: `az ssh vm --resource-group "My RG" --name MyVM`,
+			want:  `lily azure ssh vm --resource-group "My RG" --name MyVM`,
+		},
+		{
+			name:  "single-quoted resource group with spaces",
+			input: "az ssh vm --resource-group 'My RG' --name MyVM",
+			want:  "lily azure ssh vm --resource-group 'My RG' --name MyVM",
+		},
+		{
+			name:  "bastion with quoted resource group",
+			input: `az network bastion ssh --name MyBastion --resource-group "My RG"`,
+			want:  `lily azure network bastion ssh --name MyBastion --resource-group "My RG"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, rewritten, detected := DetectCloudSSH(tt.input)
+			if !detected {
+				t.Fatal("expected detection")
+			}
+			if provider != Azure {
+				t.Fatalf("expected Azure provider, got %s", provider)
+			}
+			if rewritten != tt.want {
+				t.Fatalf("unexpected rewrite: %s\nwant: %s", rewritten, tt.want)
+			}
+		})
+	}
+}
+
 func TestTokenizeCommand(t *testing.T) {
 	tests := []struct {
 		input string
