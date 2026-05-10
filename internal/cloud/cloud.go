@@ -299,14 +299,33 @@ func runAWS(ctx context.Context, args []string, command string, timeout time.Dur
 		return nil, fmt.Errorf("aws ssm send-command failed: %w", err)
 	}
 
+	// Check for common AWS error responses before parsing
+	stdout := strings.TrimSpace(sendResult.Stdout)
+	if stdout == "" {
+		// Empty response — typically means the endpoint doesn't support SSM SendCommand
+		if sendResult.Stderr != "" {
+			return nil, fmt.Errorf("aws ssm send-command returned no output; the SSM service may not be available at this endpoint. stderr: %s", strings.TrimSpace(sendResult.Stderr))
+		}
+		return nil, fmt.Errorf("aws ssm send-command returned no output; the SSM service may not be available at this endpoint")
+	}
+
+	// Detect structured error responses from AWS
+	var awsErr struct {
+		Code    string `json:"Code"`
+		Message string `json:"Message"`
+	}
+	if json.Unmarshal([]byte(stdout), &awsErr) == nil && awsErr.Code != "" {
+		return nil, fmt.Errorf("aws ssm send-command error: %s: %s", awsErr.Code, awsErr.Message)
+	}
+
 	// Parse command ID from response
 	var sendResp struct {
 		Command struct {
 			CommandID string `json:"CommandId"`
 		} `json:"Command"`
 	}
-	if err := json.Unmarshal([]byte(sendResult.Stdout), &sendResp); err != nil {
-		return nil, fmt.Errorf("failed to parse send-command response: %w\noutput: %s", err, sendResult.Stdout)
+	if err := json.Unmarshal([]byte(stdout), &sendResp); err != nil {
+		return nil, fmt.Errorf("failed to parse send-command response: %w\noutput: %s", err, stdout)
 	}
 
 	if sendResp.Command.CommandID == "" {
@@ -569,6 +588,34 @@ func printShellHelp(provider Provider) {
 	fmt.Fprintln(os.Stderr, "  exit, quit  — disconnect")
 	fmt.Fprintln(os.Stderr, "  help        — show this message")
 	fmt.Fprintln(os.Stderr, "")
+}
+
+// ValidateSubcommand checks whether the cloud CLI args form a valid SSH
+// subcommand that lily can handle. Returns an error describing what's wrong
+// if the subcommand is unsupported.
+func ValidateSubcommand(provider Provider, args []string) error {
+	switch provider {
+	case AWS:
+		if len(args) < 2 || args[0] != "ssm" {
+			return fmt.Errorf("only 'aws ssm' commands are supported; use 'lily aws ssm start-session --target <instance-id> [--command \"<cmd>\"]'")
+		}
+		if args[1] != "start-session" {
+			return fmt.Errorf("only 'aws ssm start-session' is supported; got 'aws ssm %s'", args[1])
+		}
+	case GCloud:
+		if len(args) < 2 || args[0] != "compute" || args[1] != "ssh" {
+			return fmt.Errorf("only 'gcloud compute ssh' commands are supported; use 'lily gcloud compute ssh <INSTANCE> --project <P> --zone <Z> [--command \"<cmd>\"]'")
+		}
+	case Azure:
+		isSSHVM := len(args) >= 2 && args[0] == "ssh" && args[1] == "vm"
+		isBastion := len(args) >= 4 && args[0] == "network" && args[1] == "bastion" && args[2] == "ssh"
+		if !isSSHVM && !isBastion {
+			return fmt.Errorf("only 'az ssh vm' and 'az network bastion ssh' commands are supported; use 'lily azure ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]'")
+		}
+	default:
+		return fmt.Errorf("unknown provider: %s", provider)
+	}
+	return nil
 }
 
 // DetectCloudSSH checks if a command is a cloud CLI SSH command and returns

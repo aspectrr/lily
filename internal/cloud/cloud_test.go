@@ -437,3 +437,80 @@ func TestTokenizeCommand(t *testing.T) {
 		}
 	}
 }
+
+// ── ValidateSubcommand tests ───────────────────────────────────────────
+
+func TestValidateSubcommand_AWS(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"valid ssm start-session", []string{"ssm", "start-session", "--target", "i-xxx"}, false},
+		{"valid ssm start-session with command", []string{"ssm", "start-session", "--target", "i-xxx", "--command", "ps aux"}, false},
+		{"wrong service", []string{"s3", "ls"}, true},
+		{"wrong ssm subcommand", []string{"ssm", "describe-instance-information"}, true},
+		{"empty args", []string{}, true},
+		{"only ssm", []string{"ssm"}, true},
+		{"ec2 run-instances", []string{"ec2", "run-instances"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSubcommand(AWS, tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateSubcommand(AWS, %v) = %v, wantErr %v", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateSubcommand_GCloud(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"valid compute ssh", []string{"compute", "ssh", "my-instance", "--project", "P", "--zone", "Z"}, false},
+		{"valid compute ssh with command", []string{"compute", "ssh", "my-instance", "--project", "P", "--zone", "Z", "--command", "ps aux"}, false},
+		{"instances list", []string{"compute", "instances", "list"}, true},
+		{"config set", []string{"config", "set", "project", "P"}, true},
+		{"empty args", []string{}, true},
+		{"only compute", []string{"compute"}, true},
+		{"only compute ssh", []string{"compute", "ssh"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSubcommand(GCloud, tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateSubcommand(GCloud, %v) = %v, wantErr %v", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateSubcommand_Azure(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"valid ssh vm", []string{"ssh", "vm", "--resource-group", "RG", "--name", "VM"}, false},
+		{"valid bastion ssh", []string{"network", "bastion", "ssh", "--name", "B", "--resource-group", "RG"}, false},
+		{"vm list", []string{"vm", "list"}, true},
+		{"vm start", []string{"vm", "start", "--name", "VM", "--resource-group", "RG"}, true},
+		{"empty args", []string{}, true},
+		{"only ssh", []string{"ssh"}, true},
+		{"network list", []string{"network", "vnet", "list"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSubcommand(Azure, tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateSubcommand(Azure, %v) = %v, wantErr %v", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}

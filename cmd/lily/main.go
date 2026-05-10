@@ -651,6 +651,11 @@ func cloudCmd(provider cloud.Provider, args []string, configFilePath string, tim
 	// Parse --command from args
 	providerArgs, command := cloud.ParseCommand(args)
 
+	// Validate the subcommand structure before proceeding
+	if err := cloud.ValidateSubcommand(provider, providerArgs); err != nil {
+		fatal(err.Error())
+	}
+
 	if command != "" {
 		// Single command mode: validate and execute
 		result, err := cloud.Run(context.Background(), provider, providerArgs, command, validator, timeout, maxOutput)
