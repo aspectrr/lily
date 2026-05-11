@@ -15,13 +15,14 @@ import (
 	"github.com/aspectrr/lily/internal/readonly"
 )
 
-// Provider represents a cloud provider.
+// Provider represents a cloud provider or kubectl.
 type Provider string
 
 const (
-	AWS    Provider = "aws"
-	GCloud Provider = "gcloud"
-	Azure  Provider = "azure"
+	AWS     Provider = "aws"
+	GCloud  Provider = "gcloud"
+	Azure   Provider = "azure"
+	Kubectl Provider = "kubectl"
 )
 
 // Result holds the output of a cloud command execution.
@@ -138,7 +139,7 @@ func ParseCommand(args []string) ([]string, string) {
 	return args, ""
 }
 
-// Run validates and executes a single command on a remote cloud instance.
+// Run validates and executes a single command on a remote cloud instance or pod.
 func Run(ctx context.Context, provider Provider, args []string, command string, validator *readonly.Validator, timeout time.Duration, maxOutput int64) (*Result, error) {
 	if command == "" {
 		return nil, fmt.Errorf("no command specified (use --command)")
@@ -163,25 +164,32 @@ func Run(ctx context.Context, provider Provider, args []string, command string, 
 		return runGCloud(ctx, args, safeCommand, timeout, maxOutput)
 	case Azure:
 		return runAzure(ctx, args, safeCommand, timeout, maxOutput)
+	case Kubectl:
+		return runKubectl(ctx, args, safeCommand, timeout, maxOutput)
 	default:
 		return nil, fmt.Errorf("unknown provider: %s", provider)
 	}
 }
 
-// Shell runs an interactive restricted shell on a cloud instance.
+// Shell runs an interactive restricted shell on a cloud instance or pod.
 // Each command typed is validated through lily's read-only allowlist
-// before being executed via the cloud provider's CLI.
+// before being executed via the cloud provider's CLI or kubectl.
 func Shell(ctx context.Context, provider Provider, args []string, validator *readonly.Validator, timeout time.Duration, maxOutput int64) error {
 	identifier := extractIdentifier(provider, args)
+	via := providerBinary(provider)
+	if provider == Kubectl {
+		via = "kubectl"
+	}
 
-	fmt.Fprintf(os.Stderr, "lily %s: connected to %s via %s\n", provider, identifier, providerBinary(provider))
+	fmt.Fprintf(os.Stderr, "lily %s: connected to %s via %s\n", provider, identifier, via)
 	fmt.Fprintf(os.Stderr, "  Every command is validated through lily's read-only allowlist.\n")
 	fmt.Fprintf(os.Stderr, "  Type 'exit' or Ctrl+D to disconnect.\n\n")
 
-	// Check that the cloud CLI is available
-	if _, err := exec.LookPath(providerBinary(provider)); err != nil {
-		return fmt.Errorf("%s CLI not found: install the %s CLI to use lily %s",
-			providerBinary(provider), provider, provider)
+	// Check that the CLI is available
+	binary := providerBinary(provider)
+	if _, err := exec.LookPath(binary); err != nil {
+		return fmt.Errorf("%s not found: install %s to use lily %s",
+			binary, binary, provider)
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -430,6 +438,20 @@ func runAzure(ctx context.Context, args []string, command string, timeout time.D
 	return executeCommand(ctx, "az", cmdArgs, timeout, maxOutput)
 }
 
+// ── Kubectl ──────────────────────────────────────────────────────────
+
+// runKubectl executes a validated command inside a Kubernetes pod via kubectl exec.
+// The command is appended after the -- separator in the kubectl exec args.
+func runKubectl(ctx context.Context, args []string, command string, timeout time.Duration, maxOutput int64) (*Result, error) {
+	// args should be: exec POD [-c CONTAINER] [-n NAMESPACE] ...
+	// We need to append -- <command> to the kubectl exec args
+	cmdArgs := make([]string, 0, len(args)+2)
+	cmdArgs = append(cmdArgs, args...)
+	cmdArgs = append(cmdArgs, "--", command)
+
+	return executeCommand(ctx, "kubectl", cmdArgs, timeout, maxOutput)
+}
+
 // ── Shared execution ─────────────────────────────────────────────────
 
 // executeCommand runs a cloud CLI command and captures output.
@@ -485,6 +507,8 @@ func providerBinary(provider Provider) string {
 		return "gcloud"
 	case Azure:
 		return "az"
+	case Kubectl:
+		return "kubectl"
 	default:
 		return string(provider)
 	}
@@ -540,6 +564,24 @@ func extractIdentifier(provider Provider, args []string) string {
 		}
 		if rg := extractFlagValue(args, "--resource-group"); rg != "" {
 			return rg
+		}
+	case Kubectl:
+		// For kubectl exec, find the pod name (first positional arg after "exec")
+		for i, arg := range args {
+			if arg == "exec" && i+1 < len(args) {
+				// Find next non-flag arg
+				for j := i + 1; j < len(args); j++ {
+					if !strings.HasPrefix(args[j], "-") {
+						return args[j]
+					}
+				}
+			}
+		}
+		if ns := extractFlagValue(args, "-n"); ns != "" {
+			return ns
+		}
+		if ns := extractFlagValue(args, "--namespace"); ns != "" {
+			return ns
 		}
 	}
 	return string(provider)
@@ -612,13 +654,17 @@ func ValidateSubcommand(provider Provider, args []string) error {
 		if !isSSHVM && !isBastion {
 			return fmt.Errorf("only 'az ssh vm' and 'az network bastion ssh' commands are supported; use 'lily azure ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]'")
 		}
+	case Kubectl:
+		if len(args) < 2 || args[0] != "exec" {
+			return fmt.Errorf("only 'kubectl exec' commands are supported; use 'lily kubectl exec <POD> [-c <container>] [-n <namespace>] -- <command>'")
+		}
 	default:
 		return fmt.Errorf("unknown provider: %s", provider)
 	}
 	return nil
 }
 
-// DetectCloudSSH checks if a command is a cloud CLI SSH command and returns
+// DetectCloudSSH checks if a command is a cloud CLI SSH command or kubectl exec and returns
 // the provider and whether it's detected. Used by the guard for rewrite.
 func DetectCloudSSH(command string) (provider Provider, rewritten string, detected bool) {
 	tokens := tokenizeCommand(command)
@@ -639,6 +685,8 @@ func DetectCloudSSH(command string) (provider Provider, rewritten string, detect
 		return detectGCloudCloudSSH(command, tokens)
 	case "az":
 		return detectAzureCloudSSH(command, tokens)
+	case "kubectl":
+		return detectKubectlExec(command, tokens)
 	}
 
 	return "", "", false
@@ -687,6 +735,17 @@ func detectAzureCloudSSH(command string, tokens []string) (Provider, string, boo
 		if tokens[i] == "network" && i+2 < len(tokens) && tokens[i+1] == "bastion" && tokens[i+2] == "ssh" {
 			idx := strings.Index(command, tokens[0])
 			return Azure, "lily azure" + command[idx+len(tokens[0]):], true
+		}
+	}
+	return "", "", false
+}
+
+func detectKubectlExec(command string, tokens []string) (Provider, string, bool) {
+	// Scan tokens for "exec" subcommand at any position to prevent
+	// bypass via global flags (e.g., "kubectl --kubeconfig /tmp/config exec POD -- cmd").
+	for i := 1; i < len(tokens); i++ {
+		if tokens[i] == "exec" {
+			return Kubectl, "lily " + command, true
 		}
 	}
 	return "", "", false

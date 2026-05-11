@@ -57,12 +57,18 @@ func Rewrite(command string) RewriteResult {
 		case "scp":
 			return rewriteSCP(segment)
 		default:
-			// Check for cloud CLI SSH commands (aws, gcloud, az)
+			// Check for cloud CLI SSH commands (aws, gcloud, az) and kubectl exec
 			if provider, rewritten, detected := cloud.DetectCloudSSH(segment); detected {
+				var desc string
+				if provider == cloud.Kubectl {
+					desc = fmt.Sprintf("%s exec command rewritten to lily (read-only command validation)", provider)
+				} else {
+					desc = fmt.Sprintf("%s SSH command rewritten to lily (read-only command validation)", provider)
+				}
 				return RewriteResult{
 					Decision:  "rewrite",
 					Rewritten: rewritten,
-					Reason:    fmt.Sprintf("%s SSH command rewritten to lily (read-only command validation)", provider),
+					Reason:    desc,
 				}
 			}
 

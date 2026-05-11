@@ -662,3 +662,142 @@ func TestValidateSubcommand_Azure(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSubcommand_Kubectl(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"valid exec", []string{"exec", "my-pod", "--", "ps aux"}, false},
+		{"valid exec with container", []string{"exec", "my-pod", "-c", "sidecar", "--", "ps aux"}, false},
+		{"valid exec with namespace", []string{"exec", "my-pod", "-n", "prod", "--", "ps aux"}, false},
+		{"get pods", []string{"get", "pods"}, true},
+		{"logs", []string{"logs", "my-pod"}, true},
+		{"apply", []string{"apply", "-f", "deployment.yaml"}, true},
+		{"empty args", []string{}, true},
+		{"only exec", []string{"exec"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSubcommand(Kubectl, tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateSubcommand(Kubectl, %v) = %v, wantErr %v", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// ── kubectl exec detection tests ─────────────────────────────────────────
+
+func TestDetectCloudSSH_KubectlExec(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("kubectl exec my-pod -- ps aux")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if provider != Kubectl {
+		t.Fatalf("expected Kubectl provider, got %s", provider)
+	}
+	if rewritten != "lily kubectl exec my-pod -- ps aux" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_KubectlExecWithFlags(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("kubectl exec my-pod -c sidecar -n prod -- cat /etc/config.yaml")
+	if !detected {
+		t.Fatal("expected detection")
+	}
+	if provider != Kubectl {
+		t.Fatalf("expected Kubectl provider, got %s", provider)
+	}
+	if rewritten != "lily kubectl exec my-pod -c sidecar -n prod -- cat /etc/config.yaml" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestDetectCloudSSH_KubectlExecWithGlobalFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "--kubeconfig flag before exec",
+			input: "kubectl --kubeconfig /tmp/config exec my-pod -- ps aux",
+			want:  "lily kubectl --kubeconfig /tmp/config exec my-pod -- ps aux",
+		},
+		{
+			name:  "--context flag before exec",
+			input: "kubectl --context prod exec my-pod -- uptime",
+			want:  "lily kubectl --context prod exec my-pod -- uptime",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, rewritten, detected := DetectCloudSSH(tt.input)
+			if !detected {
+				t.Fatal("expected detection")
+			}
+			if provider != Kubectl {
+				t.Fatalf("expected Kubectl provider, got %s", provider)
+			}
+			if rewritten != tt.want {
+				t.Fatalf("unexpected rewrite: %s", rewritten)
+			}
+		})
+	}
+}
+
+func TestDetectCloudSSH_KubectlOtherCommand(t *testing.T) {
+	tests := []string{
+		"kubectl get pods",
+		"kubectl describe pod my-pod",
+		"kubectl logs my-pod",
+		"kubectl apply -f deployment.yaml",
+		"kubectl delete pod my-pod",
+	}
+	for _, cmd := range tests {
+		_, _, detected := DetectCloudSSH(cmd)
+		if detected {
+			t.Fatalf("expected no detection for %q", cmd)
+		}
+	}
+}
+
+func TestDetectCloudSSH_KubectlWithPathPrefix(t *testing.T) {
+	provider, rewritten, detected := DetectCloudSSH("/usr/local/bin/kubectl exec my-pod -- ps aux")
+	if !detected {
+		t.Fatal("expected detection with path prefix")
+	}
+	if provider != Kubectl {
+		t.Fatalf("expected Kubectl, got %s", provider)
+	}
+	if rewritten != "lily /usr/local/bin/kubectl exec my-pod -- ps aux" {
+		t.Fatalf("unexpected rewrite: %s", rewritten)
+	}
+}
+
+func TestExtractIdentifier_Kubectl(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"pod name", []string{"exec", "my-pod", "--", "ps aux"}, "my-pod"},
+		{"pod name with flags", []string{"exec", "my-pod", "-c", "sidecar", "-n", "prod", "--", "ps aux"}, "my-pod"},
+		{"namespace fallback", []string{"exec", "-n", "prod"}, "prod"},
+		{"fallback", []string{"exec"}, "kubectl"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractIdentifier(Kubectl, tt.args)
+			if got != tt.want {
+				t.Errorf("extractIdentifier(Kubectl, %v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}

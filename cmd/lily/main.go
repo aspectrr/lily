@@ -39,7 +39,7 @@ Commands:
   validate-config        Validate the lily.yaml config file
   aws <args...>          Run validated command on AWS instance via SSM
   gcloud <args...>       Run validated command on GCP instance via gcloud
-  azure <args...>        Run validated command on Azure VM via az
+  kubectl <args...>       Run validated command in Kubernetes pod via kubectl exec
   install-skill          Install lily into an agent's MCP config
   uninstall-skill        Remove lily from an agent's MCP config
   list-agents            Show detected agents that support MCP
@@ -63,6 +63,8 @@ Examples:
   lily aws ssm start-session --target i-xxx --command "ps aux"
   lily gcloud compute ssh my-instance --project P --zone Z --command "ps aux"
   lily azure ssh vm --resource-group RG --name VM --command "ps aux"
+  lily kubectl exec my-pod -- ps aux
+  lily kubectl exec my-pod -c sidecar -n prod -- "cat /etc/config.yaml"
   lily install-skill claude-code
   lily install-skill all
   lily uninstall-skill cursor
@@ -181,6 +183,8 @@ func main() {
 		cloudCmd(cloud.GCloud, args[1:], configFilePath, timeout)
 	case "azure":
 		cloudCmd(cloud.Azure, args[1:], configFilePath, timeout)
+	case "kubectl":
+		cloudCmd(cloud.Kubectl, args[1:], configFilePath, timeout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		fmt.Print(usageText)
@@ -641,6 +645,8 @@ func cloudCmd(provider cloud.Provider, args []string, configFilePath string, tim
 			fatal("usage: lily gcloud compute ssh <INSTANCE> --project <P> --zone <Z> [--command \"<cmd>\"]")
 		case cloud.Azure:
 			fatal("usage: lily azure ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]")
+		case cloud.Kubectl:
+			fatal("usage: lily kubectl exec <POD> [-c <container>] [-n <namespace>] -- <command>")
 		}
 	}
 

@@ -14,7 +14,7 @@ tools:
 
 ## Purpose
 
-Lily MCP gives you safe, read-only SSH access to remote hosts. Use it to investigate server issues, read logs, check service health, inspect configs, and debug problems — without any risk of making changes.
+Lily MCP gives you safe, read-only SSH access to remote hosts and Kubernetes pods. Use it to investigate server issues, read logs, check service health, inspect configs, and debug problems — without any risk of making changes.
 
 There are two ways to use it:
 
@@ -22,6 +22,23 @@ There are two ways to use it:
 - **CLI tool** — run commands from a terminal or shell session
 
 Both use the same validation engine and allowlist.
+
+## Cloud & Kubernetes Support
+
+Lily extends its read-only validation to cloud provider CLIs (AWS SSM, Google Cloud, Azure) and `kubectl exec`:
+
+```bash
+# Cloud providers
+lily aws ssm start-session --target i-0123456789abcdef0 --command "ps aux"
+lily gcloud compute ssh my-instance --project P --zone Z --command "df -h"
+lily azure ssh vm --resource-group RG --name VM --command "uptime"
+
+# Kubernetes
+lily kubectl exec my-pod -- ps aux
+lily kubectl exec my-pod -c sidecar -n prod -- "cat /etc/config.yaml"
+```
+
+The guard automatically intercepts raw `kubectl exec POD -- command` invocations and rewrites them to go through lily's validation.
 
 ## Installation
 

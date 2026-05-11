@@ -72,23 +72,24 @@ lily <command> [arguments]
 
 ### Commands
 
-| Command                        | Description                                             |
-| ------------------------------ | ------------------------------------------------------- |
-| `serve`                        | Start MCP server on stdio (default if no command given) |
-| `hosts`                        | List hosts from `~/.ssh/config`                         |
-| `run <host> <command>`         | Execute a validated read-only command on a host         |
-| `validate <command>`           | Check if a command is allowed without executing         |
-| `check <host>`                 | Test SSH connectivity to a host                         |
-| `list-commands`                | Show all allowed commands and subcommand restrictions   |
-| `config-path`                  | Print the config file path                              |
-| `validate-config`              | Validate the lily.yaml config file                      |
-| `aws <args...>`                | Run validated command on AWS instance via SSM           |
-| `gcloud <args...>`             | Run validated command on GCP instance via gcloud        |
-| `azure <args...>`              | Run validated command on Azure VM via az                |
-| `install-skill <agent\|all>`   | Install lily into an agent's MCP config                 |
-| `uninstall-skill <agent\|all>` | Remove lily from an agent's MCP config                  |
-| `list-agents`                  | Show detected agents that support MCP                   |
-| `version`                      | Print version                                           |
+| Command                        | Description                                              |
+| ------------------------------ | -------------------------------------------------------- |
+| `serve`                        | Start MCP server on stdio (default if no command given)  |
+| `hosts`                        | List hosts from `~/.ssh/config`                          |
+| `run <host> <command>`         | Execute a validated read-only command on a host          |
+| `validate <command>`           | Check if a command is allowed without executing          |
+| `check <host>`                 | Test SSH connectivity to a host                          |
+| `list-commands`                | Show all allowed commands and subcommand restrictions    |
+| `config-path`                  | Print the config file path                               |
+| `validate-config`              | Validate the lily.yaml config file                       |
+| `aws <args...>`                | Run validated command on AWS instance via SSM            |
+| `gcloud <args...>`             | Run validated command on GCP instance via gcloud         |
+| `azure <args...>`              | Run validated command on Azure VM via az                 |
+| `kubectl <args...>`            | Run validated command in Kubernetes pod via kubectl exec |
+| `install-skill <agent\|all>`   | Install lily into an agent's MCP config                  |
+| `uninstall-skill <agent\|all>` | Remove lily from an agent's MCP config                   |
+| `list-agents`                  | Show detected agents that support MCP                    |
+| `version`                      | Print version                                            |
 
 ### Flags
 
@@ -349,9 +350,9 @@ The validated command is sent over SSH and executed by the remote host's default
 
 ---
 
-## Cloud Provider SSH
+## Cloud Provider SSH & Kubernetes Exec
 
-Lily extends its read-only command validation to cloud provider CLI commands. Agents can run diagnostic commands on AWS, Google Cloud, and Azure instances without needing SSH config entries.
+Lily extends its read-only command validation to cloud provider CLI commands and `kubectl exec`. Agents can run diagnostic commands on AWS, Google Cloud, Azure instances, and Kubernetes pods without needing SSH config entries.
 
 ### Usage
 
@@ -364,6 +365,10 @@ lily gcloud compute ssh my-instance --project my-project --zone us-central1-a --
 
 # Azure
 lily azure ssh vm --resource-group MyResourceGroup --name MyVM --command "uptime"
+
+# Kubernetes
+lily kubectl exec my-pod -- ps aux
+lily kubectl exec my-pod -c sidecar -n prod -- "cat /etc/config.yaml"
 ```
 
 Without `--command`, opens an interactive restricted shell (same as `lily ssh`):
@@ -372,6 +377,7 @@ Without `--command`, opens an interactive restricted shell (same as `lily ssh`):
 lily aws ssm start-session --target i-12345
 lily gcloud compute ssh my-instance --project P --zone Z
 lily azure ssh vm --resource-group RG --name VM
+lily kubectl exec my-pod
 ```
 
 ### How it works
@@ -381,12 +387,15 @@ lily azure ssh vm --resource-group RG --name VM
 | AWS SSM  | `send-command` + `get-command-invocation` polling | SSM Agent on instance, `aws` CLI locally |
 | GCloud   | Native `--command` flag                           | `gcloud` CLI locally                     |
 | Azure    | `--` separator for SSH command                    | `az` CLI + `ssh` extension               |
+| Kubectl  | `--` separator for exec command                   | `kubectl` CLI locally                    |
 
 AWS uses `aws ssm send-command` with the `AWS-RunShellScript` document under the hood. The command is sent, and lily polls `get-command-invocation` until the result is available. This provides synchronous, reliable command execution.
 
 GCloud uses `gcloud compute ssh --command` which natively supports non-interactive command execution. IAP tunneling (`--tunnel-through-iap`) is supported.
 
 Azure uses `az ssh vm -- <command>` to pass the validated command to the underlying SSH session. Azure Bastion (`az network bastion ssh`) is also supported.
+
+Kubernetes uses `kubectl exec POD -- <command>` to run the validated command inside the container. The guard intercepts `kubectl exec` commands and validates the command portion through lily's read-only allowlist. Only `exec` subcommands are intercepted — `kubectl get`, `kubectl logs`, etc. pass through unchanged.
 
 ### Guard integration
 
@@ -399,6 +408,7 @@ The guard automatically detects raw cloud CLI SSH commands and rewrites them to 
 | `gcloud compute ssh INSTANCE ...`            | `lily gcloud compute ssh INSTANCE ...`            |
 | `az ssh vm --resource-group RG --name VM`    | `lily azure ssh vm --resource-group RG --name VM` |
 | `az network bastion ssh ...`                 | `lily azure network bastion ssh ...`              |
+| `kubectl exec POD -- command`                | `lily kubectl exec POD -- command`                |
 
 Commands already prefixed with `lily` are left unchanged (passthrough).
 
@@ -745,7 +755,7 @@ lily/
 │   ├── allowlist/              # YAML config parsing + execution limits
 │   │   ├── allowlist.go        #   Config struct, loading, defaults
 │   │   └── allowlist_test.go
-│   ├── cloud/                  # Cloud provider SSH (AWS, GCloud, Azure)
+│   ├── cloud/                  # Cloud provider SSH (AWS, GCloud, Azure) + kubectl exec
 │   │   ├── cloud.go            #   Provider execution, command parsing, shell
 │   │   └── cloud_test.go
 │   ├── guard/                  # Guard hooks (SSH + cloud CLI rewrite)

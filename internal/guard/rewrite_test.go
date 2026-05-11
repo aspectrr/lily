@@ -391,6 +391,74 @@ func TestRewrite_CompoundCommandWithQuotes(t *testing.T) {
 	}
 }
 
+// ── kubectl exec rewrite tests ────────────────────────────────────────
+
+func TestRewrite_KubectlExec(t *testing.T) {
+	result := Rewrite("kubectl exec my-pod -- ps aux")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily kubectl exec my-pod -- ps aux" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_KubectlExecWithContainer(t *testing.T) {
+	result := Rewrite("kubectl exec my-pod -c sidecar -n prod -- cat /etc/config.yaml")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily kubectl exec my-pod -c sidecar -n prod -- cat /etc/config.yaml" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
+func TestRewrite_KubectlExecWithCommand(t *testing.T) {
+	result := Rewrite(`kubectl exec my-pod --command "ps aux"`)
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_KubectlOtherCommand(t *testing.T) {
+	tests := []string{
+		"kubectl get pods",
+		"kubectl describe pod my-pod",
+		"kubectl logs my-pod",
+		"kubectl apply -f deployment.yaml",
+	}
+	for _, cmd := range tests {
+		result := Rewrite(cmd)
+		if result.Decision != "passthrough" {
+			t.Fatalf("expected passthrough for %q, got %s", cmd, result.Decision)
+		}
+	}
+}
+
+func TestRewrite_KubectlExecLilyPassthrough(t *testing.T) {
+	result := Rewrite("lily kubectl exec my-pod -- ps aux")
+	if result.Decision != "passthrough" {
+		t.Fatalf("expected passthrough for lily kubectl exec, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_KubectlExecCompound(t *testing.T) {
+	result := Rewrite("echo test && kubectl exec my-pod -- cat /etc/shadow")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+}
+
+func TestRewrite_KubectlExecWithGlobalFlags(t *testing.T) {
+	result := Rewrite("kubectl --kubeconfig /tmp/config exec my-pod -- ps aux")
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily kubectl --kubeconfig /tmp/config exec my-pod -- ps aux" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
+	}
+}
+
 // Ensure quoted compound commands don't false-positive
 func TestRewrite_SSHInsideQuotedArg(t *testing.T) {
 	result := Rewrite(`echo "ssh is a protocol" && ls`)

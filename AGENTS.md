@@ -247,7 +247,7 @@ Uses the `--` separator to pass commands to the underlying SSH session.
 
 ### Guard Integration
 
-The guard automatically detects and rewrites raw cloud CLI SSH commands:
+The guard automatically detects and rewrites raw cloud CLI SSH commands and kubectl exec:
 
 ```
 aws ssm start-session --target i-xxx        → lily aws ssm start-session --target i-xxx
@@ -255,6 +255,7 @@ aws ec2-instance-connect ssh --instance-id  → lily aws ec2-instance-connect ss
 gcloud compute ssh INSTANCE ...             → lily gcloud compute ssh INSTANCE ...
 az ssh vm --resource-group RG --name VM     → lily azure ssh vm --resource-group RG --name VM
 az network bastion ssh ...                  → lily azure network bastion ssh ...
+kubectl exec POD -- command                 → lily kubectl exec POD -- command
 ```
 
 Commands already prefixed with `lily` are left unchanged (passthrough).
@@ -266,8 +267,8 @@ lily/
 ├── cmd/lily/main.go           # CLI entry point
 ├── internal/
 │   ├── allowlist/                  # YAML config parsing + execution limits
-│   ├── cloud/                      # Cloud provider SSH (AWS, GCloud, Azure)
-│   ├── guard/                      # Guard hooks (SSH + cloud CLI rewrite)
+│   ├── cloud/                      # Cloud provider SSH (AWS, GCloud, Azure) + kubectl exec
+│   ├── guard/                      # Guard hooks (SSH + cloud CLI + kubectl rewrite)
 │   ├── mcp/                        # MCP server, tools, rate limiter
 │   ├── readonly/                   # Command validation engine
 │   ├── sshconfig/                  # SSH config parser
