@@ -565,10 +565,13 @@ func runAzure(ctx context.Context, args []string, command string, timeout time.D
 // The command is appended after the -- separator in the kubectl exec args.
 func runKubectl(ctx context.Context, args []string, command string, timeout time.Duration, maxOutput int64) (*Result, error) {
 	// args should be: exec POD [-c CONTAINER] [-n NAMESPACE] ...
-	// We need to append -- <command> to the kubectl exec args
-	cmdArgs := make([]string, 0, len(args)+2)
+	// Split command into separate arguments for kubectl exec (unlike SSH-based
+	// providers, kubectl does not use a remote shell to interpret the command).
+	cmdParts := tokenizeCommand(command)
+	cmdArgs := make([]string, 0, len(args)+1+len(cmdParts))
 	cmdArgs = append(cmdArgs, args...)
-	cmdArgs = append(cmdArgs, "--", command)
+	cmdArgs = append(cmdArgs, "--")
+	cmdArgs = append(cmdArgs, cmdParts...)
 
 	return executeCommand(ctx, "kubectl", cmdArgs, timeout, maxOutput)
 }
@@ -778,7 +781,17 @@ func ValidateSubcommand(provider Provider, args []string) error {
 			return fmt.Errorf("only 'az ssh vm' and 'az network bastion ssh' commands are supported; use 'lily az ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]'")
 		}
 	case Kubectl:
-		if len(args) < 2 || args[0] != "exec" {
+		if len(args) < 2 {
+			return fmt.Errorf("only 'kubectl exec' commands are supported; use 'lily kubectl exec <POD> [-c <container>] [-n <namespace>] -- <command>'")
+		}
+		execFound := false
+		for _, arg := range args {
+			if arg == "exec" {
+				execFound = true
+				break
+			}
+		}
+		if !execFound {
 			return fmt.Errorf("only 'kubectl exec' commands are supported; use 'lily kubectl exec <POD> [-c <container>] [-n <namespace>] -- <command>'")
 		}
 	default:

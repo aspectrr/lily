@@ -672,6 +672,8 @@ func TestValidateSubcommand_Kubectl(t *testing.T) {
 		{"valid exec", []string{"exec", "my-pod", "--", "ps aux"}, false},
 		{"valid exec with container", []string{"exec", "my-pod", "-c", "sidecar", "--", "ps aux"}, false},
 		{"valid exec with namespace", []string{"exec", "my-pod", "-n", "prod", "--", "ps aux"}, false},
+		{"valid exec with global kubeconfig flag", []string{"--kubeconfig", "/tmp/config", "exec", "my-pod", "--", "ps aux"}, false},
+		{"valid exec with global context flag", []string{"--context", "prod", "exec", "my-pod", "--", "ps aux"}, false},
 		{"get pods", []string{"get", "pods"}, true},
 		{"logs", []string{"logs", "my-pod"}, true},
 		{"apply", []string{"apply", "-f", "deployment.yaml"}, true},
