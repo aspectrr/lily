@@ -240,7 +240,7 @@ func TestRewrite_AzureSSHVM(t *testing.T) {
 	if result.Decision != "rewrite" {
 		t.Fatalf("expected rewrite, got %s", result.Decision)
 	}
-	if result.Rewritten != "lily azure ssh vm --resource-group MyRG --name MyVM" {
+	if result.Rewritten != "lily az ssh vm --resource-group MyRG --name MyVM" {
 		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
 	}
 }
@@ -250,7 +250,7 @@ func TestRewrite_AzureSSHVMWithCommand(t *testing.T) {
 	if result.Decision != "rewrite" {
 		t.Fatalf("expected rewrite, got %s", result.Decision)
 	}
-	if result.Rewritten != "lily azure ssh vm --resource-group RG --name VM -- ps aux" {
+	if result.Rewritten != "lily az ssh vm --resource-group RG --name VM -- ps aux" {
 		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
 	}
 }
@@ -260,7 +260,7 @@ func TestRewrite_AzureBastionSSH(t *testing.T) {
 	if result.Decision != "rewrite" {
 		t.Fatalf("expected rewrite, got %s", result.Decision)
 	}
-	if result.Rewritten != "lily azure network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /subscriptions/sub/virtualMachines/MyVM" {
+	if result.Rewritten != "lily az network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /subscriptions/sub/virtualMachines/MyVM" {
 		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
 	}
 }
@@ -284,7 +284,7 @@ func TestRewrite_LilyCloudPassthrough(t *testing.T) {
 	tests := []string{
 		"lily aws ssm start-session --target i-12345",
 		"lily gcloud compute ssh my-instance --project P --zone Z",
-		"lily azure ssh vm --resource-group RG --name VM",
+		"lily az ssh vm --resource-group RG --name VM",
 	}
 	for _, cmd := range tests {
 		result := Rewrite(cmd)

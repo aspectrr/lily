@@ -226,9 +226,9 @@ func TestExtractIdentifier(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractIdentifier(tt.provider, tt.args)
+			got := ExtractIdentifier(tt.provider, tt.args)
 			if got != tt.want {
-				t.Errorf("extractIdentifier() = %q, want %q", got, tt.want)
+				t.Errorf("ExtractIdentifier() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -338,7 +338,7 @@ func TestDetectCloudSSH_AzureSSHVM(t *testing.T) {
 	if provider != Azure {
 		t.Fatalf("expected Azure provider, got %s", provider)
 	}
-	if rewritten != "lily azure ssh vm --resource-group MyRG --name MyVM" {
+	if rewritten != "lily az ssh vm --resource-group MyRG --name MyVM" {
 		t.Fatalf("unexpected rewrite: %s", rewritten)
 	}
 }
@@ -351,7 +351,7 @@ func TestDetectCloudSSH_AzureBastion(t *testing.T) {
 	if provider != Azure {
 		t.Fatalf("expected Azure provider, got %s", provider)
 	}
-	if rewritten != "lily azure network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /sub/VM" {
+	if rewritten != "lily az network bastion ssh --name MyBastion --resource-group MyRG --target-resource-id /sub/VM" {
 		t.Fatalf("unexpected rewrite: %s", rewritten)
 	}
 }
@@ -407,7 +407,7 @@ func TestDetectCloudSSH_AzureWithDashDash(t *testing.T) {
 	if !detected {
 		t.Fatal("expected detection")
 	}
-	if rewritten != "lily azure ssh vm --resource-group RG --name VM -- ps aux" {
+	if rewritten != "lily az ssh vm --resource-group RG --name VM -- ps aux" {
 		t.Fatalf("unexpected rewrite: %s", rewritten)
 	}
 }
@@ -496,12 +496,12 @@ func TestDetectCloudSSH_AzureWithGlobalFlags(t *testing.T) {
 		{
 			name:  "--output json before ssh vm",
 			input: "az --output json ssh vm --resource-group MyRG --name MyVM",
-			want:  "lily azure --output json ssh vm --resource-group MyRG --name MyVM",
+			want:  "lily az --output json ssh vm --resource-group MyRG --name MyVM",
 		},
 		{
 			name:  "--subscription flag before network bastion ssh",
 			input: "az --subscription sub-123 network bastion ssh --name B --resource-group RG",
-			want:  "lily azure --subscription sub-123 network bastion ssh --name B --resource-group RG",
+			want:  "lily az --subscription sub-123 network bastion ssh --name B --resource-group RG",
 		},
 	}
 
@@ -530,17 +530,17 @@ func TestDetectCloudSSH_AzureQuotedArgsPreserved(t *testing.T) {
 		{
 			name:  "double-quoted resource group with spaces",
 			input: `az ssh vm --resource-group "My RG" --name MyVM`,
-			want:  `lily azure ssh vm --resource-group "My RG" --name MyVM`,
+			want:  `lily az ssh vm --resource-group "My RG" --name MyVM`,
 		},
 		{
 			name:  "single-quoted resource group with spaces",
 			input: "az ssh vm --resource-group 'My RG' --name MyVM",
-			want:  "lily azure ssh vm --resource-group 'My RG' --name MyVM",
+			want:  "lily az ssh vm --resource-group 'My RG' --name MyVM",
 		},
 		{
 			name:  "bastion with quoted resource group",
 			input: `az network bastion ssh --name MyBastion --resource-group "My RG"`,
-			want:  `lily azure network bastion ssh --name MyBastion --resource-group "My RG"`,
+			want:  `lily az network bastion ssh --name MyBastion --resource-group "My RG"`,
 		},
 	}
 
@@ -794,9 +794,9 @@ func TestExtractIdentifier_Kubectl(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractIdentifier(Kubectl, tt.args)
+			got := ExtractIdentifier(Kubectl, tt.args)
 			if got != tt.want {
-				t.Errorf("extractIdentifier(Kubectl, %v) = %q, want %q", tt.args, got, tt.want)
+				t.Errorf("ExtractIdentifier(Kubectl, %v) = %q, want %q", tt.args, got, tt.want)
 			}
 		})
 	}

@@ -1,8 +1,8 @@
-# Lily MCP Configuration
+# Lily Configuration
 #
 # Location: ~/.config/lily/lily.yaml (run "lily config-path" to find it)
 #
-# This file customizes which commands are available to the MCP server.
+# This file customizes which commands are available to lily.
 # It can only ADD commands to the base allowlist — the hardcoded safety
 # restrictions (blocking rm, sudo, bash, python, etc.) cannot be overridden.
 #
@@ -71,3 +71,23 @@ extra_blocked_flags:
   #   - edit
   #   - patch
   #   - replace
+
+# ── Investigation Memory ─────────────────────────────────────────
+#
+# When enabled, Lily silently tracks debugging sessions and surfaces
+# relevant past investigations when similar issues arise. No daemon
+# required — each invocation checks a session lock file.
+#
+# Memory is opt-in. Set enabled: true to activate.
+
+memory:
+  # Enable automatic investigation tracking.
+  enabled: false
+
+  # Time with no activity before an investigation is considered complete.
+  # Default: "10m". The session is flushed on the next command invocation.
+  session_timeout: "10m"
+
+  # Max past investigations to keep per host. Older ones are auto-pruned.
+  # Default: 50.
+  max_investigations_per_host: 50

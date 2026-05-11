@@ -175,7 +175,7 @@ func Run(ctx context.Context, provider Provider, args []string, command string, 
 // Each command typed is validated through lily's read-only allowlist
 // before being executed via the cloud provider's CLI or kubectl.
 func Shell(ctx context.Context, provider Provider, args []string, validator *readonly.Validator, timeout time.Duration, maxOutput int64) error {
-	identifier := extractIdentifier(provider, args)
+	identifier := ExtractIdentifier(provider, args)
 	via := providerBinary(provider)
 	if provider == Kubectl {
 		via = "kubectl"
@@ -258,29 +258,146 @@ func Shell(ctx context.Context, provider Provider, args []string, validator *rea
 
 // ── AWS ──────────────────────────────────────────────────────────────
 
+// awsGlobalFlags are AWS CLI flags that should be passed through to both
+// send-command and get-command-invocation calls. These are global flags
+// that appear before the service subcommand (e.g., before "ssm").
+var awsGlobalFlags = []string{
+	"--endpoint-url",
+	"--region",
+	"--profile",
+	"--output",
+	"--color",
+	"--no-verify-ssl",
+	"--ca-bundle",
+	"--no-sign-request",
+}
+
+// awsGlobalFlagsWithValues are AWS CLI global flags that take a value argument.
+// Flags in this list consume the next arg as their value.
+// Any other --flag before "ssm" is treated as a valueless global flag.
+var awsGlobalFlagsWithValues = []string{
+	"--endpoint-url",
+	"--region",
+	"--profile",
+	"--output",
+	"--color",
+	"--ca-bundle",
+}
+
+// ExtractAWSGlobalFlags scans args for global AWS CLI flags (those that
+// appear before the "ssm" subcommand) and returns them as a separate slice.
+// It recognizes known value-taking flags (--endpoint-url VALUE) and
+// passes through any other --flag as valueless (--no-sign-request, etc.).
+func ExtractAWSGlobalFlags(args []string) []string {
+	var globals []string
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		// Stop at the service subcommand
+		if arg == "ssm" || arg == "ec2-instance-connect" {
+			break
+		}
+		// Check if it's a known value-taking flag (--flag value)
+		if !strings.HasPrefix(arg, "-") {
+			i++
+			continue
+		}
+		// Check --flag=value form
+		if strings.Contains(arg, "=") {
+			globals = append(globals, arg)
+			i++
+			continue
+		}
+		// Check if it's a known flag that takes a value
+		takesValue := false
+		for _, gf := range awsGlobalFlagsWithValues {
+			if arg == gf {
+				takesValue = true
+				break
+			}
+		}
+		globals = append(globals, arg)
+		if takesValue && i+1 < len(args) {
+			globals = append(globals, args[i+1])
+			i += 2
+		} else {
+			i++
+		}
+	}
+	return globals
+}
+
+// stripAWSGlobalFlags returns args with global AWS CLI flags removed.
+// This is used to find the service subcommand ("ssm") at args[0].
+func stripAWSGlobalFlags(args []string) []string {
+	// Work on a copy to avoid mutating the original slice.
+	result := make([]string, len(args))
+	copy(result, args)
+	args = result
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "ssm" || arg == "ec2-instance-connect" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			i++
+			continue
+		}
+		// Check --flag=value form
+		if strings.Contains(arg, "=") {
+			args = append(args[:i], args[i+1:]...)
+			continue
+		}
+		// Check if it's a known flag that takes a value
+		takesValue := false
+		for _, gf := range awsGlobalFlagsWithValues {
+			if arg == gf {
+				takesValue = true
+				break
+			}
+		}
+		if takesValue && i+1 < len(args) {
+			args = append(args[:i], args[i+2:]...)
+		} else {
+			args = append(args[:i], args[i+1:]...)
+		}
+	}
+	return args
+}
+
 // runAWS executes a command on an AWS instance via SSM send-command.
 // Uses AWS-RunShellScript document with command polling for synchronous results.
 func runAWS(ctx context.Context, args []string, command string, timeout time.Duration, maxOutput int64) (*Result, error) {
-	if len(args) < 2 || args[0] != "ssm" {
+	// Extract global AWS CLI flags (e.g., --endpoint-url, --region, --profile)
+	// so they can be passed through to both send-command and get-command-invocation.
+	globalFlags := ExtractAWSGlobalFlags(args)
+
+	// Strip global flags to find the service subcommand.
+	stripped := stripAWSGlobalFlags(args)
+
+	if len(stripped) == 0 {
 		return nil, fmt.Errorf("only 'aws ssm' commands are supported for remote command execution")
 	}
 
 	// EC2 Instance Connect SSH — not supported for non-interactive
-	if len(args) >= 3 && args[0] == "ec2-instance-connect" && args[1] == "ssh" {
+	if stripped[0] == "ec2-instance-connect" {
 		return nil, fmt.Errorf("aws ec2-instance-connect ssh does not support non-interactive command execution; " +
 			"use 'lily aws ssm start-session --target <instance-id> --command \"<command>\"' instead")
 	}
 
-	// Extract target instance ID
-	target := extractFlagValue(args, "--target")
+	if len(stripped) < 2 || stripped[0] != "ssm" {
+		return nil, fmt.Errorf("only 'aws ssm' commands are supported for remote command execution")
+	}
+
+	// Extract target instance ID from stripped args
+	target := extractFlagValue(stripped, "--target")
 	if target == "" {
-		target = extractFlagValue(args, "--instance-id")
+		target = extractFlagValue(stripped, "--instance-id")
 	}
 	if target == "" {
-		target = extractFlagValue(args, "--instance-ids")
-	}
-	if target == "" {
-		return nil, fmt.Errorf("--target or --instance-id is required for AWS SSM command execution")
+		target = extractFlagValue(stripped, "--instance-ids")
 	}
 
 	if timeout == 0 {
@@ -293,14 +410,16 @@ func runAWS(ctx context.Context, args []string, command string, timeout time.Dur
 		timeoutSec = 30
 	}
 
-	sendArgs := []string{
+	sendArgs := []string{}
+	sendArgs = append(sendArgs, globalFlags...)
+	sendArgs = append(sendArgs,
 		"ssm", "send-command",
 		"--instance-ids", target,
 		"--document-name", "AWS-RunShellScript",
 		"--parameters", fmt.Sprintf(`{"commands":["%s"]}`, escapeJSONString(command)),
 		"--timeout-seconds", fmt.Sprintf("%d", timeoutSec),
 		"--output", "json",
-	}
+	)
 
 	sendResult, err := executeCommand(ctx, "aws", sendArgs, timeout, maxOutput)
 	if err != nil {
@@ -341,23 +460,25 @@ func runAWS(ctx context.Context, args []string, command string, timeout time.Dur
 	}
 
 	// Step 2: Poll for command result
-	return pollSSMResult(ctx, target, sendResp.Command.CommandID, timeout, maxOutput)
+	return pollSSMResult(ctx, target, sendResp.Command.CommandID, timeout, maxOutput, globalFlags...)
 }
 
 // pollSSMResult polls get-command-invocation until the command completes.
-func pollSSMResult(ctx context.Context, instanceID, commandID string, timeout time.Duration, maxOutput int64) (*Result, error) {
+func pollSSMResult(ctx context.Context, instanceID, commandID string, timeout time.Duration, maxOutput int64, globalFlags ...string) (*Result, error) {
 	deadline := time.Now().Add(timeout)
 
 	// Initial delay for command to start executing
 	time.Sleep(1 * time.Second)
 
 	for time.Now().Before(deadline) {
-		getArgs := []string{
+		getArgs := []string{}
+		getArgs = append(getArgs, globalFlags...)
+		getArgs = append(getArgs,
 			"ssm", "get-command-invocation",
 			"--command-id", commandID,
 			"--instance-id", instanceID,
 			"--output", "json",
-		}
+		)
 
 		result, err := executeCommand(ctx, "aws", getArgs, 10*time.Second, maxOutput)
 		if err != nil {
@@ -514,9 +635,9 @@ func providerBinary(provider Provider) string {
 	}
 }
 
-// extractIdentifier extracts a human-readable identifier from cloud CLI args
-// for use in the shell prompt.
-func extractIdentifier(provider Provider, args []string) string {
+// ExtractIdentifier extracts a human-readable identifier from cloud CLI args
+// for use as a host identifier in investigation memory.
+func ExtractIdentifier(provider Provider, args []string) string {
 	switch provider {
 	case AWS:
 		if id := extractFlagValue(args, "--target"); id != "" {
@@ -638,11 +759,13 @@ func printShellHelp(provider Provider) {
 func ValidateSubcommand(provider Provider, args []string) error {
 	switch provider {
 	case AWS:
-		if len(args) < 2 || args[0] != "ssm" {
+		// Strip global AWS CLI flags to find the service subcommand.
+		stripped := stripAWSGlobalFlags(args)
+		if len(stripped) < 2 || stripped[0] != "ssm" {
 			return fmt.Errorf("only 'aws ssm' commands are supported; use 'lily aws ssm start-session --target <instance-id> [--command \"<cmd>\"]'")
 		}
-		if args[1] != "start-session" {
-			return fmt.Errorf("only 'aws ssm start-session' is supported; got 'aws ssm %s'", args[1])
+		if stripped[1] != "start-session" {
+			return fmt.Errorf("only 'aws ssm start-session' is supported; got 'aws ssm %s'", stripped[1])
 		}
 	case GCloud:
 		if len(args) < 2 || args[0] != "compute" || args[1] != "ssh" {
@@ -652,7 +775,7 @@ func ValidateSubcommand(provider Provider, args []string) error {
 		isSSHVM := len(args) >= 2 && args[0] == "ssh" && args[1] == "vm"
 		isBastion := len(args) >= 4 && args[0] == "network" && args[1] == "bastion" && args[2] == "ssh"
 		if !isSSHVM && !isBastion {
-			return fmt.Errorf("only 'az ssh vm' and 'az network bastion ssh' commands are supported; use 'lily azure ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]'")
+			return fmt.Errorf("only 'az ssh vm' and 'az network bastion ssh' commands are supported; use 'lily az ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]'")
 		}
 	case Kubectl:
 		if len(args) < 2 || args[0] != "exec" {
@@ -723,18 +846,18 @@ func detectGCloudCloudSSH(command string, tokens []string) (Provider, string, bo
 func detectAzureCloudSSH(command string, tokens []string) (Provider, string, bool) {
 	// Scan tokens for subcommand pattern at any position to prevent
 	// bypass via global CLI flags (e.g., "az --output json ssh vm").
-	// Replace "az" with "lily azure" in the original command string to
+	// Replace "az" with "lily az" in the original command string to
 	// preserve quoting of arguments (e.g., --resource-group "My RG").
 	for i := 1; i < len(tokens); i++ {
 		// az ssh vm
 		if tokens[i] == "ssh" && i+1 < len(tokens) && tokens[i+1] == "vm" {
 			idx := strings.Index(command, tokens[0])
-			return Azure, "lily azure" + command[idx+len(tokens[0]):], true
+			return Azure, "lily az" + command[idx+len(tokens[0]):], true
 		}
 		// az network bastion ssh
 		if tokens[i] == "network" && i+2 < len(tokens) && tokens[i+1] == "bastion" && tokens[i+2] == "ssh" {
 			idx := strings.Index(command, tokens[0])
-			return Azure, "lily azure" + command[idx+len(tokens[0]):], true
+			return Azure, "lily az" + command[idx+len(tokens[0]):], true
 		}
 	}
 	return "", "", false

@@ -4,48 +4,54 @@
 
 [![Release](https://img.shields.io/github/v/release/aspectrr/lily?include_prereleases)](https://github.com/aspectrr/lily/releases) [![Built with GoReleaser](https://img.shields.io/badge/Built%20with-GoReleaser-868e5e4)](https://goreleaser.com)
 
-A compiled Go binary that lets AI agents run **read-only** diagnostic commands on remote hosts via SSH — safely. Commands are validated against a strict allowlist before execution. Destructive operations (`rm`, `sudo`, `bash`, etc.) are hardcoded-blocked and cannot be overridden.
-
-Works as both an **MCP server** (for AI agents) and a **CLI tool** (for humans).
+A CLI wrapper that intercepts and rewrites AI agent commands to run **read-only** diagnostic operations on remote hosts, it also learns the more your agent uses it. Lily installs as a **guard hook** into coding agents (Claude Code, Cursor, Codex) and automatically rewrites SSH, cloud CLI, and kubectl exec commands to use validated read-only execution. Destructive operations (`rm`, `sudo`, `bash`, etc.) are hardcoded-blocked and cannot be overridden.
 
 ## Install
 
-### Binary (recommended)
+Requires **Go 1.26.2+**.
 
 ```bash
-# macOS (Apple Silicon)
-curl -sL https://github.com/aspectrr/lily/releases/latest/download/lily_darwin_arm64.tar.gz | tar xz
-sudo mv lily /usr/local/bin/
-
-# macOS (Intel)
-curl -sL https://github.com/aspectrr/lily/releases/latest/download/lily_darwin_amd64.tar.gz | tar xz
-sudo mv lily /usr/local/bin/
-
-# Linux (x86_64)
-curl -sL https://github.com/aspectrr/lily/releases/latest/download/lily_linux_amd64.tar.gz | tar xz
-sudo mv lily /usr/local/bin/
-```
-
-### Homebrew
-
-```bash
-brew install aspectrr/lily/lily
-```
-
-### From source
-
 go install github.com/aspectrr/lily/cmd/lily@latest
+```
 
-# Or clone and build
+Verify:
 
-git clone https://github.com/aspectrr/lily.git
-cd lily
-make build
-sudo make install # copies bin/lily to /usr/local/bin
+```bash
+lily version
+```
 
-````
+---
 
 ## Quick Start
+
+### Install the guard hook into your coding agent
+
+The guard hook automatically intercepts SSH, cloud CLI, and kubectl exec commands from your agent and rewrites them to use lily's validated read-only execution.
+
+```bash
+# See which agents are detected on your system
+lily guard status
+
+# Install into a specific agent
+lily guard install claude-code
+lily guard install cursor
+lily guard install codex
+
+# Or install into all detected agents
+lily guard install all
+```
+
+Once installed, your agent's SSH commands are automatically rewritten:
+
+```
+Agent runs:    ssh web1 "systemctl status nginx"
+Lily rewrites: lily run web1 "systemctl status nginx"
+
+Agent runs:    kubectl exec my-pod -- ps aux
+Lily rewrites: lily kubectl exec my-pod -- ps aux
+```
+
+### Direct CLI usage
 
 ```bash
 # List hosts from your SSH config
@@ -57,9 +63,10 @@ lily check web1
 # Run a diagnostic command
 lily run web1 "systemctl status nginx"
 
-# Install into your AI agent
-lily install-skill claude-code
-````
+# Wrap a command manually (no hook needed)
+lily aws ssm start-session --target i-12345 --command "ps aux"
+lily gcloud compute ssh my-instance --project P --zone Z --command "df -h"
+```
 
 ---
 
@@ -74,21 +81,22 @@ lily <command> [arguments]
 
 | Command                        | Description                                              |
 | ------------------------------ | -------------------------------------------------------- |
-| `serve`                        | Start MCP server on stdio (default if no command given)  |
 | `hosts`                        | List hosts from `~/.ssh/config`                          |
 | `run <host> <command>`         | Execute a validated read-only command on a host          |
 | `validate <command>`           | Check if a command is allowed without executing          |
 | `check <host>`                 | Test SSH connectivity to a host                          |
+| `rewrite <command>`            | Rewrite SSH commands to use lily run (for scripting)     |
 | `list-commands`                | Show all allowed commands and subcommand restrictions    |
 | `config-path`                  | Print the config file path                               |
 | `validate-config`              | Validate the lily.yaml config file                       |
 | `aws <args...>`                | Run validated command on AWS instance via SSM            |
 | `gcloud <args...>`             | Run validated command on GCP instance via gcloud         |
-| `azure <args...>`              | Run validated command on Azure VM via az                 |
+| `az <args...>`                 | Run validated command on Azure VM via az                 |
 | `kubectl <args...>`            | Run validated command in Kubernetes pod via kubectl exec |
-| `install-skill <agent\|all>`   | Install lily into an agent's MCP config                  |
-| `uninstall-skill <agent\|all>` | Remove lily from an agent's MCP config                   |
-| `list-agents`                  | Show detected agents that support MCP                    |
+| `guard install <agent\|all>`   | Install guard hook into an agent's config                |
+| `guard uninstall <agent\|all>` | Remove guard hook from an agent's config                 |
+| `guard status`                 | Show guard hook installation status                      |
+| `guard-hook <agent>`           | Run as agent hook (reads JSON stdin)                     |
 | `version`                      | Print version                                            |
 
 ### Flags
@@ -101,102 +109,20 @@ lily <command> [arguments]
 
 ---
 
-## MCP Server
+### Guard hook install into coding agents
 
-### What it does
-
-When you run `lily serve` (or just `lily`), it starts an MCP server on stdio that exposes 5 tools to the connected AI agent:
-
-### Tools
-
-#### `list_hosts`
-
-Discover hosts from SSH config.
-
-```
-→ list_hosts()
-← Found 2 host(s) in SSH config:
-    web1    192.168.1.10 (user: deploy)
-    db1     db.example.com (user: postgres)
-```
-
-#### `check_host`
-
-Test SSH connectivity before running commands.
-
-```
-→ check_host(host="web1")
-← Host "web1" is reachable.
-```
-
-#### `validate_command`
-
-Check whether a command would be allowed without executing it.
-
-```
-→ validate_command(command="rm -rf /")
-← BLOCKED: command "rm" is not allowed in read-only mode
-```
-
-#### `run_command`
-
-Execute a validated read-only command on a remote host. The command is checked against the full allowlist before execution. If it fails validation, the command is never sent to the host.
-
-```
-→ run_command(host="web1", command="journalctl -u nginx --no-pager -n 50")
-← Apr 30 00:12:03 web1 systemd[1]: Started nginx.service...
-```
-
-#### `list_allowed_commands`
-
-Show all currently allowed commands including user-configured additions.
-
-### How to connect
-
-Add to your agent's MCP configuration:
-
-```json
-{
-  "mcpServers": {
-    "lily": {
-      "command": "lily",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-With custom flags:
-
-```json
-{
-  "mcpServers": {
-    "lily": {
-      "command": "/usr/local/bin/lily",
-      "args": [
-        "serve",
-        "-timeout",
-        "60s",
-        "-config-file",
-        "/etc/lily/lily.yaml"
-      ]
-    }
-  }
-}
-```
-
-### One-command install into agents
+The guard hook is the recommended way to use lily. It installs as a `PreToolUse` hook that intercepts your agent's bash commands and automatically rewrites SSH/cloud/kubectl commands to use lily's validated execution.
 
 ```bash
-lily list-agents          # See which agents are detected
-lily install-skill all    # Install to all detected agents
-lily install-skill claude-code    # Specific agent
-lily uninstall-skill cursor       # Remove from an agent
+lily guard status              # Check which agents have the hook
+lily guard install all         # Install into all detected agents
+lily guard install claude-code # Install into a specific agent
+lily guard uninstall cursor    # Remove from an agent
 ```
 
-Supported agents: **Claude Code**, **Claude Desktop**, **Cursor**, **Windsurf**, **Cline**, **Pi**, **Goose**
+Supported agents: **Claude Code**, **Codex**, **Cursor**
 
-`install-skill` writes the MCP config entry and deploys a default `lily.yaml` if one doesn't already exist.
+The guard rewrites commands in-place (the agent sees the rewritten command) or blocks them entirely if they would be destructive. All error paths are non-blocking — the original command always runs if the hook fails.
 
 ---
 
@@ -364,7 +290,7 @@ lily aws ssm start-session --target i-0123456789abcdef0 --command "systemctl sta
 lily gcloud compute ssh my-instance --project my-project --zone us-central1-a --command "ps aux"
 
 # Azure
-lily azure ssh vm --resource-group MyResourceGroup --name MyVM --command "uptime"
+lily az ssh vm --resource-group MyResourceGroup --name MyVM --command "uptime"
 
 # Kubernetes
 lily kubectl exec my-pod -- ps aux
@@ -376,7 +302,7 @@ Without `--command`, opens an interactive restricted shell (same as `lily ssh`):
 ```bash
 lily aws ssm start-session --target i-12345
 lily gcloud compute ssh my-instance --project P --zone Z
-lily azure ssh vm --resource-group RG --name VM
+lily az ssh vm --resource-group RG --name VM
 lily kubectl exec my-pod
 ```
 
@@ -406,8 +332,8 @@ The guard automatically detects raw cloud CLI SSH commands and rewrites them to 
 | `aws ssm start-session --target ID`          | `lily aws ssm start-session --target ID`          |
 | `aws ec2-instance-connect ssh --instance-id` | `lily aws ec2-instance-connect ssh --instance-id` |
 | `gcloud compute ssh INSTANCE ...`            | `lily gcloud compute ssh INSTANCE ...`            |
-| `az ssh vm --resource-group RG --name VM`    | `lily azure ssh vm --resource-group RG --name VM` |
-| `az network bastion ssh ...`                 | `lily azure network bastion ssh ...`              |
+| `az ssh vm --resource-group RG --name VM`    | `lily az ssh vm --resource-group RG --name VM`    |
+| `az network bastion ssh ...`                 | `lily az network bastion ssh ...`                 |
 | `kubectl exec POD -- command`                | `lily kubectl exec POD -- command`                |
 
 Commands already prefixed with `lily` are left unchanged (passthrough).
@@ -510,6 +436,79 @@ lily validate-config
 ### Legacy config migration
 
 The config file was renamed from `allowlist.yaml` to `lily.yaml` in v0.2.0. Lily automatically falls back to `~/.config/lily/allowlist.yaml` if `lily.yaml` doesn't exist, so existing setups continue to work without changes.
+
+---
+
+## Investigation Memory
+
+Lily can automatically learn from debugging sessions and surface relevant past investigations when similar issues arise. This feature is **opt-in** and requires no daemon — it works by checking a session lock file on each command invocation.
+
+### How it works
+
+1. **Session tracking** — Every time `lily run` or a cloud command executes, Lily checks if there's an active investigation session. If no commands have run for the configured timeout (default 10 min), the previous session is flushed as a completed investigation.
+2. **Keyword extraction** — Lily automatically extracts diagnostic keywords from command output (error patterns, HTTP status codes, service names, etc.).
+3. **Similarity matching** — When a new command is run, Lily compares the current context (host, command, keywords) against past investigations using a weighted heuristic.
+4. **Hint surfacing** — If a similar past investigation is found (similarity ≥ 30%), its details are appended to the command output.
+
+### Multi-host tracking
+
+Investigations that span multiple hosts are tracked together. If you debug `web1` and then check `db1` in the same session, both hosts are recorded in a single investigation. Future sessions on `web1` will surface hints like "last time this happened, the problem was actually on db1."
+
+### Example output
+
+```
+→ lily run web1 "systemctl status nginx"
+← ● nginx.service - A high performance web server
+     Active: failed (Result: exit-code)
+
+  ━━ Past Investigation (May 10, 87% similar) ━━
+  Root cause: php-fpm pool exhaustion causing nginx 502
+  Hosts involved: web1
+  Investigation path:
+    web1: systemctl status nginx
+    web1: journalctl -u nginx --no-pager -n 20
+    web1: systemctl status php-fpm
+  Consider checking: systemctl status php-fpm
+```
+
+### Configuration
+
+```yaml
+memory:
+  # Enable automatic investigation tracking (default: false)
+  enabled: true
+
+  # Time with no activity before an investigation is considered complete
+  session_timeout: "10m"
+
+  # Max past investigations to keep per host (older are auto-pruned)
+  max_investigations_per_host: 50
+```
+
+### CLI commands
+
+```bash
+# Check memory status
+lily memory status
+
+# List past investigations
+lily memory list
+
+# Clear all stored investigations
+lily memory clear
+```
+
+### Storage
+
+Investigations are stored as flat YAML files in `~/.config/lily/memory/investigations/`. No database, no daemon. Session state is tracked via a `.session.lock` file that is checked on every command invocation.
+
+### Similarity scoring
+
+| Signal          | Weight | What it measures                               |
+| --------------- | ------ | ---------------------------------------------- |
+| Host match      | 40%    | Is the same host involved?                     |
+| Trigger overlap | 35%    | Same diagnostic command used?                  |
+| Keyword overlap | 25%    | Jaccard similarity on extracted error keywords |
 
 ---
 
@@ -763,12 +762,9 @@ lily/
 │   │   ├── hook.go             #   Agent-specific hook runner
 │   │   ├── install.go          #   Hook install/uninstall
 │   │   └── *_test.go
-│   ├── install/                # Agent config install/uninstall
-│   │   ├── install.go          #   MCP config writing, config deployment
-│   │   └── install_test.go
-│   ├── mcp/                    # MCP server + 5 tools + rate limiter
-│   │   ├── server.go           #   Tool handlers, rate limiting
-│   │   └── server_test.go
+│   ├── memory/                 # Investigation memory (session tracking, similarity)
+│   │   ├── memory.go            #   Session lock, keyword extraction, investigation persistence
+│   │   └── memory_test.go
 │   ├── readonly/               # Command validation engine
 │   │   ├── validate.go         #   7-layer validation pipeline
 │   │   └── validate_test.go    #   75+ attack vector regression tests
@@ -796,7 +792,7 @@ The compiled binary prevents the AI agent from inspecting or modifying the valid
 
 ```bash
 make build      # Build to bin/lily
-make test       # Run all tests (75 tests across 7 packages)
+make test       # Run all tests (267 tests across 12 packages)
 make all        # Test + build
 make install    # Build + copy to /usr/local/bin
 make install-go # Install via go install
