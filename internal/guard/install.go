@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -411,8 +412,24 @@ func uninstallCursorGuard(configPath string) error {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+// guardHookPattern matches commands that invoke `lily guard-hook <agent>`.
+// Uses an anchored pattern to prevent false positives from commands that
+// merely contain the substring "lily guard-hook" in arguments or messages.
+//
+// Matches: "lily guard-hook claude-code", "/usr/local/bin/lily guard-hook codex"
+// Rejects: "echo installing lily guard-hook...", "--message 'lily guard-hook done'"
+var guardHookPattern = regexp.MustCompile(`(?:^|[\s/])lily\s+guard-hook\s+\S`)
+
+// containsLilyGuard checks if a command string is a lily guard-hook invocation.
+// The input should be a single command string (not a full JSON blob).
 func containsLilyGuard(cmd string) bool {
-	return len(cmd) > 0 && strings.Contains(cmd, "lily guard-hook")
+	return len(cmd) > 0 && guardHookPattern.MatchString(cmd)
+}
+
+// containsLilyGuardInJSON checks if any command value in a JSON string
+// references lily guard-hook. Used for quick status checks on config files.
+func containsLilyGuardInJSON(data string) bool {
+	return strings.Contains(data, "lily guard-hook")
 }
 
 func writeJSONFile(path string, data any) error {
@@ -427,25 +444,4 @@ func writeJSONFile(path string, data any) error {
 	}
 
 	return os.WriteFile(path, b, 0644)
-}
-
-func replaceAll(s, old, new string) string {
-	result := ""
-	for {
-		idx := indexOf(s, old)
-		if idx < 0 {
-			return result + s
-		}
-		result += s[:idx] + new
-		s = s[idx+len(old):]
-	}
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }

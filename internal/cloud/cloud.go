@@ -767,8 +767,8 @@ func ValidateSubcommand(provider Provider, args []string) error {
 		if len(stripped) < 2 || stripped[0] != "ssm" {
 			return fmt.Errorf("only 'aws ssm' commands are supported; use 'lily aws ssm start-session --target <instance-id> [--command \"<cmd>\"]'")
 		}
-		if stripped[1] != "start-session" {
-			return fmt.Errorf("only 'aws ssm start-session' is supported; got 'aws ssm %s'", stripped[1])
+		if stripped[1] != "start-session" && stripped[1] != "send-command" {
+			return fmt.Errorf("only 'aws ssm start-session' and 'aws ssm send-command' are supported; got 'aws ssm %s'", stripped[1])
 		}
 	case GCloud:
 		if len(args) < 2 || args[0] != "compute" || args[1] != "ssh" {
@@ -836,6 +836,10 @@ func detectAWSCloudSSH(command string, tokens []string) (Provider, string, bool)
 		if tokens[i] == "ssm" && i+1 < len(tokens) && tokens[i+1] == "start-session" {
 			return AWS, "lily " + command, true
 		}
+		// aws ssm send-command (same execution backend, must also be intercepted)
+		if tokens[i] == "ssm" && i+1 < len(tokens) && tokens[i+1] == "send-command" {
+			return AWS, "lily " + command, true
+		}
 		// aws ec2-instance-connect ssh
 		if tokens[i] == "ec2-instance-connect" && i+1 < len(tokens) && tokens[i+1] == "ssh" {
 			return AWS, "lily " + command, true
@@ -859,18 +863,14 @@ func detectGCloudCloudSSH(command string, tokens []string) (Provider, string, bo
 func detectAzureCloudSSH(command string, tokens []string) (Provider, string, bool) {
 	// Scan tokens for subcommand pattern at any position to prevent
 	// bypass via global CLI flags (e.g., "az --output json ssh vm").
-	// Replace "az" with "lily az" in the original command string to
-	// preserve quoting of arguments (e.g., --resource-group "My RG").
 	for i := 1; i < len(tokens); i++ {
 		// az ssh vm
 		if tokens[i] == "ssh" && i+1 < len(tokens) && tokens[i+1] == "vm" {
-			idx := strings.Index(command, tokens[0])
-			return Azure, "lily az" + command[idx+len(tokens[0]):], true
+			return Azure, "lily " + command, true
 		}
 		// az network bastion ssh
 		if tokens[i] == "network" && i+2 < len(tokens) && tokens[i+1] == "bastion" && tokens[i+2] == "ssh" {
-			idx := strings.Index(command, tokens[0])
-			return Azure, "lily az" + command[idx+len(tokens[0]):], true
+			return Azure, "lily " + command, true
 		}
 	}
 	return "", "", false

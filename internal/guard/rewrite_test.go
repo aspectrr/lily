@@ -197,10 +197,13 @@ func TestRewrite_AWSOtherCommand(t *testing.T) {
 }
 
 func TestRewrite_AWSSSMSendCommand(t *testing.T) {
-	// aws ssm send-command is not detected by the guard (only start-session and ec2-instance-connect ssh)
+	// aws ssm send-command must be detected — it's the same execution backend as start-session
 	result := Rewrite("aws ssm send-command --instance-ids i-12345 --document-name AWS-RunShellScript")
-	if result.Decision != "passthrough" {
-		t.Fatalf("expected passthrough for aws ssm send-command, got %s", result.Decision)
+	if result.Decision != "rewrite" {
+		t.Fatalf("expected rewrite for aws ssm send-command, got %s", result.Decision)
+	}
+	if result.Rewritten != "lily aws ssm send-command --instance-ids i-12345 --document-name AWS-RunShellScript" {
+		t.Fatalf("unexpected rewrite: %s", result.Rewritten)
 	}
 }
 

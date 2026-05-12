@@ -435,6 +435,16 @@ func TestDetectCloudSSH_AWSWithGlobalFlags(t *testing.T) {
 			input: "aws --output json ec2-instance-connect ssh --instance-id i-xxx",
 			want:  "lily aws --output json ec2-instance-connect ssh --instance-id i-xxx",
 		},
+		{
+			name:  "ssm send-command is detected",
+			input: "aws ssm send-command --instance-ids i-xxx --document-name AWS-RunShellScript",
+			want:  "lily aws ssm send-command --instance-ids i-xxx --document-name AWS-RunShellScript",
+		},
+		{
+			name:  "ssm send-command with global flags",
+			input: "aws --profile admin ssm send-command --instance-ids i-xxx --document-name AWS-RunShellScript",
+			want:  "lily aws --profile admin ssm send-command --instance-ids i-xxx --document-name AWS-RunShellScript",
+		},
 	}
 
 	for _, tt := range tests {
@@ -596,6 +606,8 @@ func TestValidateSubcommand_AWS(t *testing.T) {
 	}{
 		{"valid ssm start-session", []string{"ssm", "start-session", "--target", "i-xxx"}, false},
 		{"valid ssm start-session with command", []string{"ssm", "start-session", "--target", "i-xxx", "--command", "ps aux"}, false},
+		{"valid ssm send-command", []string{"ssm", "send-command", "--instance-ids", "i-xxx", "--document-name", "AWS-RunShellScript"}, false},
+		{"valid ssm send-command with parameters", []string{"ssm", "send-command", "--instance-ids", "i-xxx", "--document-name", "AWS-RunShellScript", "--parameters", `{"commands":["ps aux"]}`}, false},
 		{"wrong service", []string{"s3", "ls"}, true},
 		{"wrong ssm subcommand", []string{"ssm", "describe-instance-information"}, true},
 		{"empty args", []string{}, true},

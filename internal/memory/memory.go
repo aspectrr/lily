@@ -365,13 +365,13 @@ func (t *Tracker) loadSession(path string) *Session {
 
 func (t *Tracker) saveSession(path string, session *Session) {
 	// Ensure directory exists
-	os.MkdirAll(t.dir, 0755)
+	os.MkdirAll(t.dir, 0700)
 
 	data, err := yaml.Marshal(session)
 	if err != nil {
 		return
 	}
-	os.WriteFile(path, data, 0644)
+	os.WriteFile(path, data, 0600)
 }
 
 // Investigation persistence
@@ -382,7 +382,7 @@ func (t *Tracker) investigationsDir() string {
 
 func (t *Tracker) saveInvestigation(inv *Investigation) {
 	dir := t.investigationsDir()
-	os.MkdirAll(dir, 0755)
+	os.MkdirAll(dir, 0700)
 
 	// Generate filename from timestamp and hosts
 	ts := inv.StartTime.Format("2006-01-02-150405")
@@ -394,7 +394,7 @@ func (t *Tracker) saveInvestigation(inv *Investigation) {
 	if err != nil {
 		return
 	}
-	os.WriteFile(path, data, 0644)
+	os.WriteFile(path, data, 0600)
 }
 
 func (t *Tracker) loadInvestigations() []*Investigation {

@@ -150,7 +150,7 @@ func TestInstallUninstallClaudeCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsLilyGuard(string(data)) {
+	if !containsLilyGuardInJSON(string(data)) {
 		t.Fatal("expected lily guard to be in settings file")
 	}
 
@@ -205,7 +205,7 @@ func TestInstallUninstallCodex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsLilyGuard(string(data)) {
+	if !containsLilyGuardInJSON(string(data)) {
 		t.Fatal("expected lily guard to be in hooks.json")
 	}
 
@@ -231,7 +231,7 @@ func TestInstallUninstallCodex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if containsLilyGuard(string(data)) {
+	if containsLilyGuardInJSON(string(data)) {
 		t.Fatal("lily guard should have been removed")
 	}
 }
