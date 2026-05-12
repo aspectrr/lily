@@ -5,17 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/aspectrr/lily/internal/allowlist"
-	"github.com/aspectrr/lily/internal/install"
-	"github.com/aspectrr/lily/internal/mcp"
+	"github.com/aspectrr/lily/internal/cloud"
+	"github.com/aspectrr/lily/internal/guard"
+	"github.com/aspectrr/lily/internal/memory"
 	"github.com/aspectrr/lily/internal/readonly"
 	"github.com/aspectrr/lily/internal/sshconfig"
 	"github.com/aspectrr/lily/internal/sshexec"
+	"github.com/aspectrr/lily/internal/sshshell"
 	"github.com/aspectrr/lily/internal/version"
-	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 const usageText = `lily - Read-only remote command execution via SSH for AI agents
@@ -25,17 +27,26 @@ Usage:
   lily <command> [arguments]
 
 Commands:
-  serve                  Start MCP server (stdio transport) [default]
   hosts                  List hosts from SSH config
   run <host> <command>   Execute a validated read-only command on a host
+  ssh <host>             Open a restricted interactive SSH shell on a host
   validate <command>     Check if a command is allowed (no execution)
   check <host>           Test SSH connectivity to a host
   list-commands          List all allowed commands
   config-path            Show the config file path
   validate-config        Validate the lily.yaml config file
-  install-skill          Install lily into an agent's MCP config
-  uninstall-skill        Remove lily from an agent's MCP config
-  list-agents            Show detected agents that support MCP
+  aws <args...>          Run validated command on AWS instance via SSM
+  gcloud <args...>       Run validated command on GCP instance via gcloud
+  az <args...>           Run validated command on Azure VM via az
+  kubectl <args...>       Run validated command in Kubernetes pod via kubectl exec
+  rewrite <command>      Rewrite SSH commands to use lily run (for hooks)
+  guard-hook <agent>     Run as agent hook (reads JSON stdin)
+  guard install <agent>  Install guard hook into an agent
+  guard uninstall <agent> Remove guard hook from an agent
+  guard status           Show guard hook installation status
+  memory status          Show investigation memory status
+  memory list            List past investigations
+  memory clear           Clear all stored investigations
   version                Print version
 
 Flags:
@@ -44,14 +55,17 @@ Flags:
   -timeout <duration>    SSH command timeout (default: 30s)
 
 Examples:
-  lily serve
   lily hosts
   lily run web1 "systemctl status nginx"
   lily validate "rm -rf /"
-  lily install-skill claude-code
-  lily install-skill all
-  lily uninstall-skill cursor
-  lily list-agents
+  lily aws ssm start-session --target i-xxx --command "ps aux"
+  lily gcloud compute ssh my-instance --project P --zone Z --command "ps aux"
+  lily az ssh vm --resource-group RG --name VM --command "ps aux"
+  lily kubectl exec my-pod -- ps aux
+  lily kubectl exec my-pod -c sidecar -n prod -- "cat /etc/config.yaml"
+  lily guard install claude-code
+  lily guard install all
+  lily guard status
 `
 
 // version is now defined in internal/version to avoid duplication.
@@ -99,13 +113,11 @@ func main() {
 	}
 
 	if len(args) == 0 {
-		serve(sshConfigPath, configFilePath, timeout)
-		return
+		fmt.Print(usageText)
+		os.Exit(0)
 	}
 
 	switch args[0] {
-	case "serve":
-		serve(sshConfigPath, configFilePath, timeout)
 	case "hosts":
 		hosts(sshConfigPath)
 	case "run":
@@ -113,6 +125,11 @@ func main() {
 			fatal("usage: lily run <host> <command>")
 		}
 		run(sshConfigPath, configFilePath, timeout, args[1], strings.Join(args[2:], " "))
+	case "ssh":
+		if len(args) < 2 {
+			fatal("usage: lily ssh <host>")
+		}
+		sshShell(sshConfigPath, configFilePath, timeout, args[1])
 	case "validate":
 		if len(args) < 2 {
 			fatal("usage: lily validate <command>")
@@ -129,20 +146,30 @@ func main() {
 		fmt.Println(allowlist.DefaultConfigPath())
 	case "validate-config":
 		validateConfig(configFilePath)
-	case "install-skill":
-		if len(args) < 2 {
-			fatal("usage: lily install-skill <agent|all> [path/to/lily]")
-		}
-		installSkill(args[1], args[2:])
-	case "uninstall-skill":
-		if len(args) < 2 {
-			fatal("usage: lily uninstall-skill <agent|all>")
-		}
-		uninstallSkill(args[1])
-	case "list-agents":
-		listAgents()
 	case "version":
 		fmt.Printf("lily %s\n", version.Version)
+	case "memory":
+		memoryCmd(args[1:])
+	case "rewrite":
+		if len(args) < 2 {
+			fatal("usage: lily rewrite <command>")
+		}
+		rewriteCmd(strings.Join(args[1:], " "))
+	case "guard-hook":
+		if len(args) < 2 {
+			fatal("usage: lily guard-hook <agent>  (reads JSON stdin)")
+		}
+		os.Exit(guard.RunHook(args[1]))
+	case "guard":
+		guardCmd(args[1:])
+	case "aws":
+		cloudCmd(cloud.AWS, args[1:], configFilePath, timeout)
+	case "gcloud":
+		cloudCmd(cloud.GCloud, args[1:], configFilePath, timeout)
+	case "az":
+		cloudCmd(cloud.Azure, args[1:], configFilePath, timeout)
+	case "kubectl":
+		cloudCmd(cloud.Kubectl, args[1:], configFilePath, timeout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		fmt.Print(usageText)
@@ -157,20 +184,6 @@ func loadConfig(path string) *allowlist.Config {
 		return &allowlist.Config{}
 	}
 	return cfg
-}
-
-func serve(sshConfigPath, configFilePath string, timeout time.Duration) {
-	hosts, err := sshconfig.Parse(sshConfigPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not parse SSH config: %s\n", err)
-	}
-
-	cfg := loadConfig(configFilePath)
-	server := mcp.NewServer(hosts, timeout, cfg)
-
-	if err := mcpserver.ServeStdio(server); err != nil {
-		fatal(fmt.Sprintf("MCP server error: %s", err))
-	}
 }
 
 func hosts(sshConfigPath string) {
@@ -236,6 +249,21 @@ func run(sshConfigPath, configFilePath string, timeout time.Duration, hostName, 
 		fatal(fmt.Sprintf("execution failed: %s", err))
 	}
 
+	// Record command in investigation memory and get hints
+	var hint *memory.Hint
+	if cfg.Memory.Enabled {
+		tracker := memory.NewTracker(&memory.Config{
+			Enabled:                  true,
+			SessionTimeout:           cfg.Memory.SessionTimeout,
+			MaxInvestigationsPerHost: cfg.Memory.MaxInvestigationsPerHost,
+		})
+		output := result.Stdout
+		if result.Stderr != "" {
+			output += "\n" + result.Stderr
+		}
+		hint = tracker.RecordCommand(hostName, command, output)
+	}
+
 	if result.Stdout != "" {
 		fmt.Print(result.Stdout)
 	}
@@ -245,6 +273,14 @@ func run(sshConfigPath, configFilePath string, timeout time.Duration, hostName, 
 	if result.Truncated {
 		fmt.Fprintf(os.Stderr, "[output truncated at %d bytes]\n", maxOutput)
 	}
+
+	// Append past investigation hint if relevant
+	if hint != nil {
+		if hintText := hint.FormatHint(); hintText != "" {
+			fmt.Print(hintText)
+		}
+	}
+
 	os.Exit(result.ExitCode)
 }
 
@@ -257,6 +293,27 @@ func validate(configFilePath, command string) {
 		os.Exit(1)
 	}
 	fmt.Printf("ALLOWED: %q\n", command)
+}
+
+func sshShell(sshConfigPath, configFilePath string, timeout time.Duration, hostName string) {
+	hosts, err := sshconfig.Parse(sshConfigPath)
+	if err != nil {
+		fatal(fmt.Sprintf("failed to parse SSH config: %s", err))
+	}
+
+	if sshconfig.LookupHost(hosts, hostName) == nil {
+		fatal(fmt.Sprintf("host %q not found in SSH config", hostName))
+	}
+
+	cfg := loadConfig(configFilePath)
+	validator := readonly.NewValidator(cfg.ExtraCommands, cfg.SubcommandRestrictions(), cfg.BlockedFlags())
+	maxOutput := cfg.GetMaxOutputBytes()
+	exec := sshexec.NewExecutor(hosts, timeout, maxOutput)
+
+	shell := sshshell.NewShell(hosts, exec, validator)
+	if err := shell.Run(context.Background(), hostName); err != nil {
+		fatal(fmt.Sprintf("ssh session failed: %s", err))
+	}
 }
 
 func check(sshConfigPath, configFilePath string, timeout time.Duration, hostName string) {
@@ -335,102 +392,335 @@ func validateConfig(configFilePath string) {
 	fmt.Printf("  Max output:        %d bytes\n", cfg.GetMaxOutputBytes())
 }
 
-func installSkill(agentName string, extraArgs []string) {
-	binaryPath := ""
-	if len(extraArgs) > 0 {
-		binaryPath = extraArgs[0]
+func fatal(msg string) {
+	fmt.Fprintf(os.Stderr, "error: %s\n", msg)
+	os.Exit(1)
+}
+
+func findBinary() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
 	}
-	if binaryPath == "" {
-		binaryPath = install.FindBinary()
+	candidates := []string{
+		filepath.Join(".", "bin", "lily"),
+		filepath.Join(".", "lily"),
+	}
+	if home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".local", "bin", "lily"),
+			filepath.Join(home, "go", "bin", "lily"),
+		)
 	}
 
+	if abs, err := filepath.Abs("./bin/lily"); err == nil {
+		if _, err := os.Stat(abs); err == nil {
+			return abs
+		}
+	}
+
+	for _, c := range candidates {
+		abs, err := filepath.Abs(c)
+		if err != nil {
+			abs = c
+		}
+		if _, err := os.Stat(abs); err == nil {
+			return abs
+		}
+	}
+
+	return "lily"
+}
+
+func rewriteCmd(command string) {
+	result := guard.Rewrite(command)
+	switch result.Decision {
+	case "rewrite":
+		fmt.Print(result.Rewritten)
+	case "block":
+		fmt.Fprintf(os.Stderr, "blocked: %s\n", result.Reason)
+		os.Exit(1)
+	case "passthrough":
+		// No output, exit 0 — passthrough
+	default:
+		// No output, exit 0
+	}
+}
+
+func guardCmd(args []string) {
+	if len(args) == 0 {
+		fatal("usage: lily guard <install|uninstall|status> [agent]")
+	}
+
+	switch args[0] {
+	case "install":
+		if len(args) < 2 {
+			fatal("usage: lily guard install <agent|all>")
+		}
+		installGuard(args[1])
+	case "uninstall":
+		if len(args) < 2 {
+			fatal("usage: lily guard uninstall <agent|all>")
+		}
+		uninstallGuard(args[1])
+	case "status":
+		guardStatus()
+	default:
+		fatal(fmt.Sprintf("unknown guard subcommand: %s", args[0]))
+	}
+}
+
+func installGuard(agentName string) {
+	binaryPath := findBinary()
+
 	if agentName == "all" {
-		targets := install.KnownTargets()
+		targets := guard.GuardTargets()
 		installed := 0
 		for _, tgt := range targets {
-			result, err := install.Install(tgt, binaryPath, nil)
-			if err != nil {
+			if err := guard.InstallGuard(tgt, binaryPath); err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ %s: %s\n", tgt.Name, err)
 			} else {
 				fmt.Printf("  ✓ %s → %s\n", tgt.Name, tgt.ConfigPath)
-				if result.AllowlistDeployed {
-					fmt.Printf("    Created config: %s\n", result.AllowlistPath)
-				}
 				installed++
 			}
 		}
-		fmt.Printf("\nInstalled to %d agent(s).\n", installed)
+		fmt.Printf("\nInstalled guard to %d agent(s).\n", installed)
 		return
 	}
 
-	target := install.LookupTarget(agentName)
+	target := guard.LookupGuardTarget(agentName)
 	if target == nil {
-		fatal(fmt.Sprintf("unknown agent %q. Available: %s", agentName, install.TargetNames()))
+		fatal(fmt.Sprintf("unknown agent %q. Available: %s", agentName, guard.GuardTargetNames()))
 	}
 
-	result, err := install.Install(*target, binaryPath, nil)
-	if err != nil {
+	if err := guard.InstallGuard(*target, binaryPath); err != nil {
 		fatal(fmt.Sprintf("install failed: %s", err))
 	}
-	fmt.Printf("Installed lily to %s → %s\n", target.Name, target.ConfigPath)
-	if result.AllowlistDeployed {
-		fmt.Printf("Created config: %s\n", result.AllowlistPath)
-	}
-	fmt.Printf("\nEdit config: %s\n", install.ConfigFilePath())
+	fmt.Printf("Installed lily guard to %s → %s\n", target.Name, target.ConfigPath)
 }
 
-func uninstallSkill(agentName string) {
+func uninstallGuard(agentName string) {
 	if agentName == "all" {
-		targets := install.KnownTargets()
+		targets := guard.GuardTargets()
 		removed := 0
 		for _, t := range targets {
-			if err := install.Uninstall(t); err != nil {
+			if err := guard.UninstallGuard(t); err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ %s: %s\n", t.Name, err)
 			} else {
 				fmt.Printf("  ✓ %s removed\n", t.Name)
 				removed++
 			}
 		}
-		fmt.Printf("\nRemoved from %d agent(s).\n", removed)
+		fmt.Printf("\nRemoved guard from %d agent(s).\n", removed)
 		return
 	}
 
-	target := install.LookupTarget(agentName)
+	target := guard.LookupGuardTarget(agentName)
 	if target == nil {
-		fatal(fmt.Sprintf("unknown agent %q. Available: %s", agentName, install.TargetNames()))
+		fatal(fmt.Sprintf("unknown agent %q. Available: %s", agentName, guard.GuardTargetNames()))
 	}
 
-	if err := install.Uninstall(*target); err != nil {
+	if err := guard.UninstallGuard(*target); err != nil {
 		fatal(fmt.Sprintf("uninstall failed: %s", err))
 	}
-	fmt.Printf("Removed lily from %s\n", target.Name)
+	fmt.Printf("Removed lily guard from %s\n", target.Name)
 }
 
-func listAgents() {
-	targets := install.KnownTargets()
-	detected := install.DetectedTargets()
+func guardStatus() {
+	targets := guard.GuardTargets()
 
-	fmt.Print("Known MCP agents:\n\n")
-	fmt.Printf("  %-20s %-10s %s\n", "AGENT", "STATUS", "CONFIG PATH")
+	fmt.Println("Lily guard status:")
+	fmt.Println()
+	fmt.Printf("  %-20s %-12s %s\n", "AGENT", "GUARD", "CONFIG PATH")
 	fmt.Println(strings.Repeat("-", 85))
 
-	detectedMap := map[string]bool{}
-	for _, d := range detected {
-		detectedMap[d.Name] = true
-	}
-
 	for _, t := range targets {
-		status := "not found"
-		if detectedMap[t.Name] {
-			status = "detected"
+		status := "not installed"
+		switch t.ConfigFormat {
+		case "claude-settings":
+			if isGuardInstalledInJSON(t.ConfigPath) {
+				status = "✓ installed"
+			}
+		case "codex-hooks":
+			if isGuardInstalledInJSON(t.ConfigPath) {
+				status = "✓ installed"
+			}
+		case "cursor-hooks":
+			if isGuardInstalledInJSON(t.ConfigPath) {
+				status = "✓ installed"
+			}
+		case "pi-extension":
+			if fileExists(t.ConfigPath) {
+				status = "✓ installed"
+			}
 		}
-		fmt.Printf("  %-20s %-10s %s\n", t.Name, status, t.ConfigPath)
+		fmt.Printf("  %-20s %-12s %s\n", t.Name, status, t.ConfigPath)
 	}
 
-	fmt.Printf("\nUsage: lily install-skill <agent>\n       lily install-skill all\n")
+	fmt.Printf("\nUsage: lily guard install <agent>\n       lily guard install all\n")
 }
 
-func fatal(msg string) {
-	fmt.Fprintf(os.Stderr, "error: %s\n", msg)
-	os.Exit(1)
+// cloudCmd handles lily aws, lily gcloud, and lily az CLI commands.
+// These wrap cloud provider SSH commands with lily's read-only validation.
+//
+// Usage:
+//
+//	lily aws ssm start-session --target i-xxx --command "ps aux"
+//	lily gcloud compute ssh INSTANCE --project P --zone Z --command "ps aux"
+//	lily az ssh vm --resource-group RG --name VM --command "ps aux"
+//
+// Without --command, opens an interactive restricted shell.
+func cloudCmd(provider cloud.Provider, args []string, configFilePath string, timeout time.Duration) {
+	if len(args) == 0 {
+		switch provider {
+		case cloud.AWS:
+			fatal("usage: lily aws ssm start-session --target <instance-id> [--command \"<cmd>\"]")
+		case cloud.GCloud:
+			fatal("usage: lily gcloud compute ssh <INSTANCE> --project <P> --zone <Z> [--command \"<cmd>\"]")
+		case cloud.Azure:
+			fatal("usage: lily az ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]")
+		case cloud.Kubectl:
+			fatal("usage: lily kubectl exec <POD> [-c <container>] [-n <namespace>] -- <command>")
+		}
+	}
+
+	cfg := loadConfig(configFilePath)
+	validator := readonly.NewValidator(cfg.ExtraCommands, cfg.SubcommandRestrictions(), cfg.BlockedFlags())
+	maxOutput := cfg.GetMaxOutputBytes()
+
+	// Parse --command from args
+	providerArgs, command := cloud.ParseCommand(args)
+
+	// Validate the subcommand structure before proceeding
+	if err := cloud.ValidateSubcommand(provider, providerArgs); err != nil {
+		fatal(err.Error())
+	}
+
+	if command != "" {
+		// Single command mode: validate and execute
+		result, err := cloud.Run(context.Background(), provider, providerArgs, command, validator, timeout, maxOutput)
+		if err != nil {
+			fatal(err.Error())
+		}
+
+		// Record command in investigation memory and get hints
+		var hint *memory.Hint
+		if cfg.Memory.Enabled {
+			identifier := cloud.ExtractIdentifier(provider, providerArgs)
+			tracker := memory.NewTracker(&memory.Config{
+				Enabled:                  true,
+				SessionTimeout:           cfg.Memory.SessionTimeout,
+				MaxInvestigationsPerHost: cfg.Memory.MaxInvestigationsPerHost,
+			})
+			output := result.Stdout
+			if result.Stderr != "" {
+				output += "\n" + result.Stderr
+			}
+			hint = tracker.RecordCommand(identifier, command, output)
+		}
+
+		if result.Stdout != "" {
+			fmt.Print(result.Stdout)
+		}
+		if result.Stderr != "" {
+			fmt.Fprintf(os.Stderr, "%s", result.Stderr)
+		}
+
+		// Append past investigation hint if relevant
+		if hint != nil {
+			if hintText := hint.FormatHint(); hintText != "" {
+				fmt.Print(hintText)
+			}
+		}
+
+		os.Exit(result.ExitCode)
+	} else {
+		// Interactive restricted shell mode
+		if err := cloud.Shell(context.Background(), provider, providerArgs, validator, timeout, maxOutput); err != nil {
+			fatal(err.Error())
+		}
+	}
+}
+
+func isGuardInstalledInJSON(configPath string) bool {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "lily guard-hook")
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func memoryCmd(args []string) {
+	if len(args) == 0 {
+		fatal("usage: lily memory <status|list|clear>")
+	}
+
+	cfg := loadConfig("")
+
+	switch args[0] {
+	case "status":
+		tracker := memory.NewTracker(&memory.Config{
+			Enabled:                  cfg.Memory.Enabled,
+			SessionTimeout:           cfg.Memory.SessionTimeout,
+			MaxInvestigationsPerHost: cfg.Memory.MaxInvestigationsPerHost,
+		})
+		invs := tracker.ListInvestigations()
+		fmt.Printf("Investigation memory: %s\n", func() string {
+			if cfg.Memory.Enabled {
+				return "enabled"
+			}
+			return "disabled"
+		}())
+		fmt.Printf("  Stored investigations: %d\n", len(invs))
+		fmt.Printf("  Session timeout:      %s\n", cfg.Memory.SessionTimeout)
+		fmt.Printf("  Max per host:         %d\n", func() int {
+			if cfg.Memory.MaxInvestigationsPerHost > 0 {
+				return cfg.Memory.MaxInvestigationsPerHost
+			}
+			return memory.DefaultMaxInvestigations
+		}())
+		fmt.Printf("  Memory directory:     %s\n", memory.MemoryDir())
+
+	case "list":
+		tracker := memory.NewTracker(&memory.Config{
+			Enabled:                  true, // Always allow listing even if disabled
+			SessionTimeout:           cfg.Memory.SessionTimeout,
+			MaxInvestigationsPerHost: cfg.Memory.MaxInvestigationsPerHost,
+		})
+		invs := tracker.ListInvestigations()
+		if len(invs) == 0 {
+			fmt.Println("No past investigations found.")
+			return
+		}
+		fmt.Printf("Past investigations (%d):\n\n", len(invs))
+		for _, inv := range invs {
+			fmt.Printf("  %s  hosts: [%s]  trigger: %s",
+				inv.StartTime.Format("2006-01-02 15:04"),
+				strings.Join(inv.Hosts, ", "),
+				inv.Trigger)
+			if inv.RootCauseHint != "" {
+				fmt.Printf("  cause: %s", inv.RootCauseHint)
+			}
+			fmt.Printf("  (%d commands)\n", len(inv.Commands))
+		}
+
+	case "clear":
+		tracker := memory.NewTracker(&memory.Config{
+			Enabled:                  true,
+			SessionTimeout:           cfg.Memory.SessionTimeout,
+			MaxInvestigationsPerHost: cfg.Memory.MaxInvestigationsPerHost,
+		})
+		if err := tracker.ClearAll(); err != nil {
+			fatal(fmt.Sprintf("failed to clear memory: %s", err))
+		}
+		fmt.Println("All investigation memory cleared.")
+
+	default:
+		fatal(fmt.Sprintf("unknown memory subcommand: %s", args[0]))
+	}
 }

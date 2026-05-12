@@ -1,120 +1,73 @@
 ---
 name: lily
 description: Read-only remote command execution via SSH for AI agents. Diagnose remote servers, check logs, inspect services, read files, and investigate issues on hosts defined in SSH config. Provides safe read-only access with strict command validation — the agent cannot bypass restrictions.
-version: 0.2.0
-tools:
-  - list_hosts
-  - check_host
-  - run_command
-  - validate_command
-  - list_allowed_commands
+version: 0.3.0
 ---
 
-# Lily MCP — Remote Server Diagnostics
+# Lily — Remote Server Diagnostics
 
 ## Purpose
 
-Lily MCP gives you safe, read-only SSH access to remote hosts. Use it to investigate server issues, read logs, check service health, inspect configs, and debug problems — without any risk of making changes.
+Lily gives you safe, read-only SSH access to remote hosts and Kubernetes pods. Use it to investigate server issues, read logs, check service health, inspect configs, and debug problems — without any risk of making changes.
 
-There are two ways to use it:
+Lily works as:
 
-- **MCP server** — the agent calls tools directly (primary mode for AI agents)
-- **CLI tool** — run commands from a terminal or shell session
+- **Guard hook** — installs into coding agents (Claude Code, Cursor, Codex) and automatically intercepts/rewrites SSH, cloud CLI, and kubectl exec commands
+- **CLI tool** — run commands directly from a terminal or shell session
 
 Both use the same validation engine and allowlist.
 
-## Installation
+## Cloud & Kubernetes Support
 
-### Quick install into your agent
+Lily extends its read-only validation to cloud provider CLIs (AWS SSM, Google Cloud, Azure) and `kubectl exec`:
 
 ```bash
-# Build
-make build
+# Cloud providers
+lily aws ssm start-session --target i-0123456789abcdef0 --command "ps aux"
+lily gcloud compute ssh my-instance --project P --zone Z --command "df -h"
+lily az ssh vm --resource-group RG --name VM --command "uptime"
 
-# See which agents are detected
-bin/lily list-agents
-
-# Install to a specific agent (writes MCP config + deploys config)
-bin/lily install-skill claude-code
-bin/lily install-skill cursor
-bin/lily install-skill all
-
-# Or install globally
-make install
-lily install-skill all
+# Kubernetes
+lily kubectl exec my-pod -- ps aux
+lily kubectl exec my-pod -c sidecar -n prod -- "cat /etc/config.yaml"
 ```
 
-`install-skill` does two things:
+The guard automatically intercepts raw `kubectl exec POD -- command` invocations and rewrites them to go through lily's validation.
 
-1. Writes the MCP server entry into the agent's config file
-2. Deploys a default `~/.config/lily/lily.yaml` if one doesn't exist
+## Installation
 
-### Manual MCP config
+Requires **Go 1.26.2+**.
 
-If you prefer to configure manually, add this to your agent's MCP config:
-
-```json
-{
-  "mcpServers": {
-    "lily": {
-      "command": "lily",
-      "args": ["serve"]
-    }
-  }
-}
+```bash
+go install github.com/aspectrr/lily/cmd/lily@latest
 ```
 
-Optional flags: `-config-file <path>`, `-config <path>`, `-timeout <duration>`
+### Guard hook install
 
-## MCP Tools
+```bash
+# Install into a specific agent
+lily guard install claude-code
+lily guard install cursor
+lily guard install codex
 
-When running as an MCP server, these tools are available:
-
-### `list_hosts`
-
-Discover hosts from SSH config. **Always call this first.**
-
-```
-→ list_hosts()
-← Found 2 host(s):
-    web1    192.168.1.10 (user: deploy)
-    db1     db.example.com (user: postgres)
+# Or install into all detected agents
+lily guard install all
 ```
 
-### `check_host`
+The guard hook installs as a `PreToolUse` hook that automatically rewrites SSH/cloud/kubectl commands to use lily's validated execution.
 
-Verify SSH connectivity before running diagnostics.
+### Manual config
 
+If you prefer to configure manually, point your agent at the `lily` binary. The agent can call it directly:
+
+```bash
+lily run <host> "<command>"
+lily check <host>
+lily hosts
+lily validate "<command>"
 ```
-→ check_host(host="web1")
-← Host "web1" is reachable.
-```
-
-### `validate_command`
-
-Check if a command would pass validation without executing it. Useful when unsure.
-
-```
-→ validate_command(command="systemctl restart nginx")
-← BLOCKED: systemctl subcommand "restart" is not allowed in read-only mode
-```
-
-### `run_command`
-
-Execute a validated read-only command on a remote host.
-
-```
-→ run_command(host="web1", command="journalctl -u nginx --no-pager -n 50")
-← (command output)
-```
-
-### `list_allowed_commands`
-
-Show all currently allowed commands including user-configured additions.
 
 ## CLI Usage
-
-Everything the MCP tools do is also available from the command line:
 
 ```bash
 # List available hosts
@@ -132,10 +85,10 @@ lily validate "rm -rf /"
 # Show all allowed commands
 lily list-commands
 
-# Manage agent installs
-lily list-agents
-lily install-skill claude-code
-lily uninstall-skill cursor
+# Manage guard hooks
+lily guard status
+lily guard install claude-code
+lily guard uninstall cursor
 
 # Manage config
 lily config-path
@@ -147,46 +100,46 @@ lily validate-config
 ### Service not working
 
 ```
-run_command(host="web1", command="systemctl status nginx")
-run_command(host="web1", command="journalctl -u nginx --since '1 hour ago' --no-pager")
-run_command(host="web1", command="ss -tlnp | grep 80")
+lily run web1 "systemctl status nginx"
+lily run web1 "journalctl -u nginx --since '1 hour ago' --no-pager"
+lily run web1 "ss -tlnp | grep 80"
 ```
 
 ### Disk full
 
 ```
-run_command(host="web1", command="df -h")
-run_command(host="web1", command="du -sh /var/log/* | sort -rh | head -10")
+lily run web1 "df -h"
+lily run web1 "du -sh /var/log/* | sort -rh | head -10"
 ```
 
 ### Memory pressure
 
 ```
-run_command(host="web1", command="free -m")
-run_command(host="web1", command="ps aux --sort=-%mem | head -20")
+lily run web1 "free -m"
+lily run web1 "ps aux --sort=-%mem | head -20"
 ```
 
 ### Read a config file
 
 ```
-run_command(host="web1", command="cat /etc/nginx/nginx.conf")
-run_command(host="web1", command="find /etc/nginx -name '*.conf' -type f")
+lily run web1 "cat /etc/nginx/nginx.conf"
+lily run web1 "find /etc/nginx -name '*.conf' -type f"
 ```
 
 ### Network problems
 
 ```
-run_command(host="web1", command="ip addr")
-run_command(host="web1", command="ss -tlnp")
-run_command(host="web1", command="curl -s localhost:9200/_cluster/health?pretty")
+lily run web1 "ip addr"
+lily run web1 "ss -tlnp"
+lily run web1 "curl -s localhost:9200/_cluster/health?pretty"
 ```
 
 ### Log investigation
 
 ```
-run_command(host="web1", command="tail -100 /var/log/syslog")
-run_command(host="web1", command="dmesg | tail -50")
-run_command(host="web1", command="journalctl -p err --no-pager -n 50")
+lily run web1 "tail -100 /var/log/syslog"
+lily run web1 "dmesg | tail -50"
+lily run web1 "journalctl -p err --no-pager -n 50"
 ```
 
 ## What's Allowed
@@ -242,8 +195,39 @@ extra_blocked_flags:
   docker:
     - exec
     - run
+
+# ── Investigation Memory ──
+# Learn from past debugging sessions automatically.
+memory:
+  enabled: false # Set true to activate
+  session_timeout: "10m" # Flush investigation after this idle time
+  max_investigations_per_host: 50
 ```
 
 Config only **adds** to the base allowlist. Hardcoded restrictions cannot be overridden — even if an agent edits the YAML file, `rm`, `sudo`, `bash`, etc. remain blocked.
 
 Run `lily validate-config` to check your config, or `lily config-path` to find where it lives.
+
+## Investigation Memory
+
+When enabled in config, Lily automatically tracks debugging sessions and surfaces relevant past investigations when similar issues arise.
+
+```yaml
+memory:
+  enabled: true
+```
+
+When an agent runs a command that matches a past investigation (same host, similar command, overlapping error keywords), Lily appends a hint to the output:
+
+```
+← ● nginx.service - A high performance web server
+     Active: failed (Result: exit-code)
+
+  ━━ Past Investigation (May 10, 87% similar) ━━
+  Root cause: php-fpm pool exhaustion causing nginx 502
+  Investigation path:
+    web1: systemctl status nginx
+    web1: systemctl status php-fpm
+```
+
+Multi-host investigations are tracked together — if you debug `web1` then check `db1` in the same session, future sessions on `web1` will see that the problem was linked to `db1`.

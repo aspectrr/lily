@@ -1,0 +1,916 @@
+package cloud
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/aspectrr/lily/internal/readonly"
+)
+
+// Provider represents a cloud provider or kubectl.
+type Provider string
+
+const (
+	AWS     Provider = "aws"
+	GCloud  Provider = "gcloud"
+	Azure   Provider = "azure"
+	Kubectl Provider = "kubectl"
+)
+
+// Result holds the output of a cloud command execution.
+type Result struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+// limitedBuffer caps output at a configurable limit.
+type limitedBuffer struct {
+	bytes.Buffer
+	limit     int64
+	truncated bool
+}
+
+func (lb *limitedBuffer) Write(p []byte) (n int, err error) {
+	if lb.limit > 0 && int64(lb.Buffer.Len())+int64(len(p)) > lb.limit {
+		remaining := lb.limit - int64(lb.Buffer.Len())
+		if remaining > 0 {
+			lb.Buffer.Write(p[:remaining])
+		}
+		lb.truncated = true
+		return len(p), nil
+	}
+	return lb.Buffer.Write(p)
+}
+
+func (lb *limitedBuffer) ReadFrom(r io.Reader) (n int64, err error) {
+	buf := make([]byte, 32*1024)
+	for {
+		nr, readErr := r.Read(buf)
+		if nr > 0 {
+			nw, writeErr := lb.Write(buf[:nr])
+			if writeErr != nil {
+				return n, writeErr
+			}
+			n += int64(nw)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				readErr = nil
+			}
+			return n, readErr
+		}
+		if lb.truncated {
+			_, _ = io.Copy(io.Discard, r)
+			return n, nil
+		}
+	}
+}
+
+// ParseCommand extracts the remote command from args using multiple strategies:
+//  1. --command flag (lily-specific, takes precedence)
+//  2. -- separator (Azure-style: everything after -- is the remote command)
+//  3. --parameters JSON with "command" or "commands" key (AWS SSM)
+//
+// Returns the remaining provider args and the extracted command.
+func ParseCommand(args []string) ([]string, string) {
+	// Strategy 1: --command flag
+	for i, arg := range args {
+		if arg == "--command" && i+1 < len(args) {
+			remaining := make([]string, 0, len(args)-2)
+			remaining = append(remaining, args[:i]...)
+			remaining = append(remaining, args[i+2:]...)
+			return remaining, args[i+1]
+		}
+		if strings.HasPrefix(arg, "--command=") {
+			remaining := make([]string, 0, len(args)-1)
+			remaining = append(remaining, args[:i]...)
+			remaining = append(remaining, args[i+1:]...)
+			return remaining, strings.TrimPrefix(arg, "--command=")
+		}
+	}
+
+	// Strategy 2: -- separator (Azure-style)
+	for i, arg := range args {
+		if arg == "--" && i+1 < len(args) && args[i+1] != "" {
+			remaining := make([]string, 0, i)
+			remaining = append(remaining, args[:i]...)
+			return remaining, strings.Join(args[i+1:], " ")
+		}
+	}
+
+	// Strategy 3: --parameters JSON (AWS SSM)
+	for i, arg := range args {
+		if arg == "--parameters" && i+1 < len(args) {
+			var params map[string]interface{}
+			if err := json.Unmarshal([]byte(args[i+1]), &params); err == nil {
+				for _, key := range []string{"commands", "command"} {
+					if val, ok := params[key]; ok {
+						switch v := val.(type) {
+						case []interface{}:
+							if len(v) > 0 {
+								if cmd, ok := v[0].(string); ok {
+									remaining := make([]string, 0, len(args)-2)
+									remaining = append(remaining, args[:i]...)
+									remaining = append(remaining, args[i+2:]...)
+									return remaining, cmd
+								}
+							}
+						case string:
+							remaining := make([]string, 0, len(args)-2)
+							remaining = append(remaining, args[:i]...)
+							remaining = append(remaining, args[i+2:]...)
+							return remaining, v
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return args, ""
+}
+
+// Run validates and executes a single command on a remote cloud instance or pod.
+func Run(ctx context.Context, provider Provider, args []string, command string, validator *readonly.Validator, timeout time.Duration, maxOutput int64) (*Result, error) {
+	if command == "" {
+		return nil, fmt.Errorf("no command specified (use --command)")
+	}
+
+	// Validate the command through lily's read-only allowlist
+	if err := validator.ValidateCommand(command); err != nil {
+		return nil, fmt.Errorf("command blocked: %w", err)
+	}
+
+	// Sanitize the command (safe shell quoting)
+	safeCommand, err := validator.SanitizeCommand(command)
+	if err != nil {
+		return nil, fmt.Errorf("command sanitization failed: %w", err)
+	}
+
+	// Execute via provider-specific mechanism
+	switch provider {
+	case AWS:
+		return runAWS(ctx, args, safeCommand, timeout, maxOutput)
+	case GCloud:
+		return runGCloud(ctx, args, safeCommand, timeout, maxOutput)
+	case Azure:
+		return runAzure(ctx, args, safeCommand, timeout, maxOutput)
+	case Kubectl:
+		return runKubectl(ctx, args, safeCommand, timeout, maxOutput)
+	default:
+		return nil, fmt.Errorf("unknown provider: %s", provider)
+	}
+}
+
+// Shell runs an interactive restricted shell on a cloud instance or pod.
+// Each command typed is validated through lily's read-only allowlist
+// before being executed via the cloud provider's CLI or kubectl.
+func Shell(ctx context.Context, provider Provider, args []string, validator *readonly.Validator, timeout time.Duration, maxOutput int64) error {
+	identifier := ExtractIdentifier(provider, args)
+	via := providerBinary(provider)
+	if provider == Kubectl {
+		via = "kubectl"
+	}
+
+	fmt.Fprintf(os.Stderr, "lily %s: connected to %s via %s\n", provider, identifier, via)
+	fmt.Fprintf(os.Stderr, "  Every command is validated through lily's read-only allowlist.\n")
+	fmt.Fprintf(os.Stderr, "  Type 'exit' or Ctrl+D to disconnect.\n\n")
+
+	// Check that the CLI is available
+	binary := providerBinary(provider)
+	if _, err := exec.LookPath(binary); err != nil {
+		return fmt.Errorf("%s not found: install %s to use lily %s",
+			binary, binary, provider)
+	}
+
+	scanner := bufio.NewScanner(os.Stdin)
+	prompt := fmt.Sprintf("lily/%s/%s> ", provider, identifier)
+
+	for {
+		fmt.Fprint(os.Stderr, prompt)
+
+		if !scanner.Scan() {
+			break
+		}
+
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		switch line {
+		case "exit", "quit":
+			fmt.Fprintln(os.Stderr, "disconnected.")
+			return nil
+		case "help":
+			printShellHelp(provider)
+			continue
+		}
+
+		// Validate the command
+		if err := validator.ValidateCommand(line); err != nil {
+			fmt.Fprintf(os.Stderr, "blocked: %s\n", err)
+			continue
+		}
+
+		// Sanitize the command
+		safeCommand, err := validator.SanitizeCommand(line)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sanitization failed: %s\n", err)
+			continue
+		}
+
+		// Execute on the remote cloud instance
+		result, err := Run(ctx, provider, args, safeCommand, validator, timeout, maxOutput)
+		// Run validates again (redundant but safe), so we ignore the double-validation
+		// by using the internal run functions directly
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s\n", err)
+			continue
+		}
+
+		if result.Stdout != "" {
+			fmt.Print(result.Stdout)
+		}
+		if result.Stderr != "" {
+			fmt.Fprintf(os.Stderr, "%s", result.Stderr)
+		}
+		if result.ExitCode != 0 {
+			fmt.Fprintf(os.Stderr, "[exit code %d]\n", result.ExitCode)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("reading input: %w", err)
+	}
+
+	return nil
+}
+
+// ── AWS ──────────────────────────────────────────────────────────────
+
+// awsGlobalFlags are AWS CLI flags that should be passed through to both
+// send-command and get-command-invocation calls. These are global flags
+// that appear before the service subcommand (e.g., before "ssm").
+var awsGlobalFlags = []string{
+	"--endpoint-url",
+	"--region",
+	"--profile",
+	"--output",
+	"--color",
+	"--no-verify-ssl",
+	"--ca-bundle",
+	"--no-sign-request",
+}
+
+// awsGlobalFlagsWithValues are AWS CLI global flags that take a value argument.
+// Flags in this list consume the next arg as their value.
+// Any other --flag before "ssm" is treated as a valueless global flag.
+var awsGlobalFlagsWithValues = []string{
+	"--endpoint-url",
+	"--region",
+	"--profile",
+	"--output",
+	"--color",
+	"--ca-bundle",
+}
+
+// ExtractAWSGlobalFlags scans args for global AWS CLI flags (those that
+// appear before the "ssm" subcommand) and returns them as a separate slice.
+// It recognizes known value-taking flags (--endpoint-url VALUE) and
+// passes through any other --flag as valueless (--no-sign-request, etc.).
+func ExtractAWSGlobalFlags(args []string) []string {
+	var globals []string
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		// Stop at the service subcommand
+		if arg == "ssm" || arg == "ec2-instance-connect" {
+			break
+		}
+		// Check if it's a known value-taking flag (--flag value)
+		if !strings.HasPrefix(arg, "-") {
+			i++
+			continue
+		}
+		// Check --flag=value form
+		if strings.Contains(arg, "=") {
+			globals = append(globals, arg)
+			i++
+			continue
+		}
+		// Check if it's a known flag that takes a value
+		takesValue := false
+		for _, gf := range awsGlobalFlagsWithValues {
+			if arg == gf {
+				takesValue = true
+				break
+			}
+		}
+		globals = append(globals, arg)
+		if takesValue && i+1 < len(args) {
+			globals = append(globals, args[i+1])
+			i += 2
+		} else {
+			i++
+		}
+	}
+	return globals
+}
+
+// stripAWSGlobalFlags returns args with global AWS CLI flags removed.
+// This is used to find the service subcommand ("ssm") at args[0].
+func stripAWSGlobalFlags(args []string) []string {
+	// Work on a copy to avoid mutating the original slice.
+	result := make([]string, len(args))
+	copy(result, args)
+	args = result
+
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "ssm" || arg == "ec2-instance-connect" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			i++
+			continue
+		}
+		// Check --flag=value form
+		if strings.Contains(arg, "=") {
+			args = append(args[:i], args[i+1:]...)
+			continue
+		}
+		// Check if it's a known flag that takes a value
+		takesValue := false
+		for _, gf := range awsGlobalFlagsWithValues {
+			if arg == gf {
+				takesValue = true
+				break
+			}
+		}
+		if takesValue && i+1 < len(args) {
+			args = append(args[:i], args[i+2:]...)
+		} else {
+			args = append(args[:i], args[i+1:]...)
+		}
+	}
+	return args
+}
+
+// runAWS executes a command on an AWS instance via SSM send-command.
+// Uses AWS-RunShellScript document with command polling for synchronous results.
+func runAWS(ctx context.Context, args []string, command string, timeout time.Duration, maxOutput int64) (*Result, error) {
+	// Extract global AWS CLI flags (e.g., --endpoint-url, --region, --profile)
+	// so they can be passed through to both send-command and get-command-invocation.
+	globalFlags := ExtractAWSGlobalFlags(args)
+
+	// Strip global flags to find the service subcommand.
+	stripped := stripAWSGlobalFlags(args)
+
+	if len(stripped) == 0 {
+		return nil, fmt.Errorf("only 'aws ssm' commands are supported for remote command execution")
+	}
+
+	// EC2 Instance Connect SSH — not supported for non-interactive
+	if stripped[0] == "ec2-instance-connect" {
+		return nil, fmt.Errorf("aws ec2-instance-connect ssh does not support non-interactive command execution; " +
+			"use 'lily aws ssm start-session --target <instance-id> --command \"<command>\"' instead")
+	}
+
+	if len(stripped) < 2 || stripped[0] != "ssm" {
+		return nil, fmt.Errorf("only 'aws ssm' commands are supported for remote command execution")
+	}
+
+	// Extract target instance ID from stripped args
+	target := extractFlagValue(stripped, "--target")
+	if target == "" {
+		target = extractFlagValue(stripped, "--instance-id")
+	}
+	if target == "" {
+		target = extractFlagValue(stripped, "--instance-ids")
+	}
+
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+
+	// Step 1: Send command via SSM
+	timeoutSec := int(timeout.Seconds())
+	if timeoutSec < 30 {
+		timeoutSec = 30
+	}
+
+	sendArgs := []string{}
+	sendArgs = append(sendArgs, globalFlags...)
+	sendArgs = append(sendArgs,
+		"ssm", "send-command",
+		"--instance-ids", target,
+		"--document-name", "AWS-RunShellScript",
+		"--parameters", fmt.Sprintf(`{"commands":["%s"]}`, escapeJSONString(command)),
+		"--timeout-seconds", fmt.Sprintf("%d", timeoutSec),
+		"--output", "json",
+	)
+
+	sendResult, err := executeCommand(ctx, "aws", sendArgs, timeout, maxOutput)
+	if err != nil {
+		return nil, fmt.Errorf("aws ssm send-command failed: %w", err)
+	}
+
+	// Check for common AWS error responses before parsing
+	stdout := strings.TrimSpace(sendResult.Stdout)
+	if stdout == "" {
+		// Empty response — typically means the endpoint doesn't support SSM SendCommand
+		if sendResult.Stderr != "" {
+			return nil, fmt.Errorf("aws ssm send-command returned no output; the SSM service may not be available at this endpoint. stderr: %s", strings.TrimSpace(sendResult.Stderr))
+		}
+		return nil, fmt.Errorf("aws ssm send-command returned no output; the SSM service may not be available at this endpoint")
+	}
+
+	// Detect structured error responses from AWS
+	var awsErr struct {
+		Code    string `json:"Code"`
+		Message string `json:"Message"`
+	}
+	if json.Unmarshal([]byte(stdout), &awsErr) == nil && awsErr.Code != "" {
+		return nil, fmt.Errorf("aws ssm send-command error: %s: %s", awsErr.Code, awsErr.Message)
+	}
+
+	// Parse command ID from response
+	var sendResp struct {
+		Command struct {
+			CommandID string `json:"CommandId"`
+		} `json:"Command"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &sendResp); err != nil {
+		return nil, fmt.Errorf("failed to parse send-command response: %w\noutput: %s", err, stdout)
+	}
+
+	if sendResp.Command.CommandID == "" {
+		return nil, fmt.Errorf("no CommandId in send-command response: %s", sendResult.Stdout)
+	}
+
+	// Step 2: Poll for command result
+	return pollSSMResult(ctx, target, sendResp.Command.CommandID, timeout, maxOutput, globalFlags...)
+}
+
+// pollSSMResult polls get-command-invocation until the command completes.
+func pollSSMResult(ctx context.Context, instanceID, commandID string, timeout time.Duration, maxOutput int64, globalFlags ...string) (*Result, error) {
+	deadline := time.Now().Add(timeout)
+
+	// Initial delay for command to start executing
+	time.Sleep(1 * time.Second)
+
+	for time.Now().Before(deadline) {
+		getArgs := []string{}
+		getArgs = append(getArgs, globalFlags...)
+		getArgs = append(getArgs,
+			"ssm", "get-command-invocation",
+			"--command-id", commandID,
+			"--instance-id", instanceID,
+			"--output", "json",
+		)
+
+		result, err := executeCommand(ctx, "aws", getArgs, 10*time.Second, maxOutput)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		var invocation struct {
+			Status                string `json:"Status"`
+			StandardOutputContent string `json:"StandardOutputContent"`
+			StandardErrorContent  string `json:"StandardErrorContent"`
+			ResponseCode          int    `json:"ResponseCode"`
+		}
+
+		if err := json.Unmarshal([]byte(result.Stdout), &invocation); err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		switch invocation.Status {
+		case "Success":
+			return &Result{
+				Stdout:   invocation.StandardOutputContent,
+				Stderr:   invocation.StandardErrorContent,
+				ExitCode: invocation.ResponseCode,
+			}, nil
+		case "Failed", "Cancelled", "TimedOut":
+			return &Result{
+				Stdout:   invocation.StandardOutputContent,
+				Stderr:   invocation.StandardErrorContent,
+				ExitCode: 1,
+			}, nil
+		default:
+			// Pending, InProgress — keep polling
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	return nil, fmt.Errorf("timed out waiting for SSM command %s to complete", commandID)
+}
+
+// ── GCloud ───────────────────────────────────────────────────────────
+
+// runGCloud executes a command on a GCP instance via gcloud compute ssh.
+// Uses gcloud's native --command flag for non-interactive execution.
+func runGCloud(ctx context.Context, args []string, command string, timeout time.Duration, maxOutput int64) (*Result, error) {
+	// Verify this is a compute ssh command
+	if len(args) < 2 || args[0] != "compute" || args[1] != "ssh" {
+		return nil, fmt.Errorf("only 'gcloud compute ssh' commands are supported for remote command execution")
+	}
+
+	// Build gcloud command with --command flag
+	cmdArgs := make([]string, 0, len(args)+2)
+	cmdArgs = append(cmdArgs, args...)
+	cmdArgs = append(cmdArgs, "--command", command)
+
+	return executeCommand(ctx, "gcloud", cmdArgs, timeout, maxOutput)
+}
+
+// ── Azure ────────────────────────────────────────────────────────────
+
+// runAzure executes a command on an Azure VM via az ssh vm or az network bastion ssh.
+// Uses the -- separator to pass the command to the underlying SSH session.
+func runAzure(ctx context.Context, args []string, command string, timeout time.Duration, maxOutput int64) (*Result, error) {
+	// Verify this is an SSH-type command
+	isSSHVM := len(args) >= 2 && args[0] == "ssh" && args[1] == "vm"
+	isBastion := len(args) >= 4 && args[0] == "network" && args[1] == "bastion" && args[2] == "ssh"
+
+	if !isSSHVM && !isBastion {
+		return nil, fmt.Errorf("only 'az ssh vm' and 'az network bastion ssh' commands are supported for remote command execution")
+	}
+
+	// Build az command with -- separator and command
+	cmdArgs := make([]string, 0, len(args)+2)
+	cmdArgs = append(cmdArgs, args...)
+	cmdArgs = append(cmdArgs, "--", command)
+
+	return executeCommand(ctx, "az", cmdArgs, timeout, maxOutput)
+}
+
+// ── Kubectl ──────────────────────────────────────────────────────────
+
+// runKubectl executes a validated command inside a Kubernetes pod via kubectl exec.
+// The command is appended after the -- separator in the kubectl exec args.
+func runKubectl(ctx context.Context, args []string, command string, timeout time.Duration, maxOutput int64) (*Result, error) {
+	// args should be: exec POD [-c CONTAINER] [-n NAMESPACE] ...
+	// Split command into separate arguments for kubectl exec (unlike SSH-based
+	// providers, kubectl does not use a remote shell to interpret the command).
+	cmdParts := tokenizeCommand(command)
+	cmdArgs := make([]string, 0, len(args)+1+len(cmdParts))
+	cmdArgs = append(cmdArgs, args...)
+	cmdArgs = append(cmdArgs, "--")
+	cmdArgs = append(cmdArgs, cmdParts...)
+
+	return executeCommand(ctx, "kubectl", cmdArgs, timeout, maxOutput)
+}
+
+// ── Shared execution ─────────────────────────────────────────────────
+
+// executeCommand runs a cloud CLI command and captures output.
+func executeCommand(ctx context.Context, binary string, args []string, timeout time.Duration, maxOutput int64) (*Result, error) {
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		return nil, fmt.Errorf("%s CLI not found: install the %s CLI to use this command", binary, binary)
+	}
+
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, path, args...)
+
+	var stdout, stderr limitedBuffer
+	stdout.limit = maxOutput
+	stderr.limit = maxOutput
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+
+	result := &Result{
+		Stdout: stdout.String(),
+		Stderr: stderr.String(),
+	}
+
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("command timed out after %s", timeout)
+		} else {
+			return nil, fmt.Errorf("execution failed: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// ── Utility functions ────────────────────────────────────────────────
+
+// providerBinary returns the CLI binary name for a provider.
+func providerBinary(provider Provider) string {
+	switch provider {
+	case AWS:
+		return "aws"
+	case GCloud:
+		return "gcloud"
+	case Azure:
+		return "az"
+	case Kubectl:
+		return "kubectl"
+	default:
+		return string(provider)
+	}
+}
+
+// ExtractIdentifier extracts a human-readable identifier from cloud CLI args
+// for use as a host identifier in investigation memory.
+func ExtractIdentifier(provider Provider, args []string) string {
+	switch provider {
+	case AWS:
+		if id := extractFlagValue(args, "--target"); id != "" {
+			return id
+		}
+		if id := extractFlagValue(args, "--instance-id"); id != "" {
+			return id
+		}
+		if id := extractFlagValue(args, "--instance-ids"); id != "" {
+			return id
+		}
+	case GCloud:
+		// Instance name is the first positional arg after "compute ssh"
+		for i, arg := range args {
+			if i >= 2 && arg == "ssh" {
+				// Next arg after "ssh" is the instance name
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					return args[i+1]
+				}
+			}
+		}
+		// Fallback: find first non-flag, non-flag-value positional arg
+		skipNext := false
+		for i := 2; i < len(args); i++ {
+			if skipNext {
+				skipNext = false
+				continue
+			}
+			if strings.HasPrefix(args[i], "--") {
+				// Skip flag value too (unless --flag=value form)
+				if !strings.Contains(args[i], "=") {
+					skipNext = true
+				}
+				continue
+			}
+			if strings.HasPrefix(args[i], "-") {
+				skipNext = true
+				continue
+			}
+			return args[i]
+		}
+	case Azure:
+		if name := extractFlagValue(args, "--name"); name != "" {
+			return name
+		}
+		if rg := extractFlagValue(args, "--resource-group"); rg != "" {
+			return rg
+		}
+	case Kubectl:
+		// For kubectl exec, find the pod name (first positional arg after "exec")
+		for i, arg := range args {
+			if arg == "exec" && i+1 < len(args) {
+				// Find next non-flag arg
+				for j := i + 1; j < len(args); j++ {
+					if !strings.HasPrefix(args[j], "-") {
+						return args[j]
+					}
+				}
+			}
+		}
+		if ns := extractFlagValue(args, "-n"); ns != "" {
+			return ns
+		}
+		if ns := extractFlagValue(args, "--namespace"); ns != "" {
+			return ns
+		}
+	}
+	return string(provider)
+}
+
+// extractFlagValue returns the value following a flag in args.
+// Handles both --flag value and --flag=value forms.
+func extractFlagValue(args []string, flag string) string {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(arg, flag+"=") {
+			return strings.TrimPrefix(arg, flag+"=")
+		}
+	}
+	return ""
+}
+
+// escapeJSONString escapes a string for safe embedding in a JSON value.
+func escapeJSONString(s string) string {
+	// Use json.Marshal to get proper escaping, then strip the quotes
+	b, err := json.Marshal(s)
+	if err != nil {
+		return s
+	}
+	// json.Marshal wraps in quotes: "string" → strip them
+	if len(b) >= 2 {
+		return string(b[1 : len(b)-1])
+	}
+	return s
+}
+
+// printShellHelp displays help for the cloud restricted shell.
+func printShellHelp(provider Provider) {
+	fmt.Fprintln(os.Stderr, "lily <provider> — restricted cloud shell")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  Every command is validated against lily's read-only allowlist.")
+	fmt.Fprintln(os.Stderr, "  Allowed: file inspection (cat, ls, find), system info (ps, systemctl status),")
+	fmt.Fprintln(os.Stderr, "           network diagnostics (ss, dig, curl GET), and text processing (grep, awk).")
+	fmt.Fprintln(os.Stderr, "  Blocked: destructive commands (rm, mv, chmod), shells (bash, sh, python),")
+	fmt.Fprintln(os.Stderr, "           privilege escalation (sudo, su), and file transfer (scp, rsync).")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintf(os.Stderr, "  Provider: %s (via %s CLI)\n", provider, providerBinary(provider))
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  exit, quit  — disconnect")
+	fmt.Fprintln(os.Stderr, "  help        — show this message")
+	fmt.Fprintln(os.Stderr, "")
+}
+
+// ValidateSubcommand checks whether the cloud CLI args form a valid SSH
+// subcommand that lily can handle. Returns an error describing what's wrong
+// if the subcommand is unsupported.
+func ValidateSubcommand(provider Provider, args []string) error {
+	switch provider {
+	case AWS:
+		// Strip global AWS CLI flags to find the service subcommand.
+		stripped := stripAWSGlobalFlags(args)
+		if len(stripped) < 2 || stripped[0] != "ssm" {
+			return fmt.Errorf("only 'aws ssm' commands are supported; use 'lily aws ssm start-session --target <instance-id> [--command \"<cmd>\"]'")
+		}
+		if stripped[1] != "start-session" && stripped[1] != "send-command" {
+			return fmt.Errorf("only 'aws ssm start-session' and 'aws ssm send-command' are supported; got 'aws ssm %s'", stripped[1])
+		}
+	case GCloud:
+		if len(args) < 2 || args[0] != "compute" || args[1] != "ssh" {
+			return fmt.Errorf("only 'gcloud compute ssh' commands are supported; use 'lily gcloud compute ssh <INSTANCE> --project <P> --zone <Z> [--command \"<cmd>\"]'")
+		}
+	case Azure:
+		isSSHVM := len(args) >= 2 && args[0] == "ssh" && args[1] == "vm"
+		isBastion := len(args) >= 4 && args[0] == "network" && args[1] == "bastion" && args[2] == "ssh"
+		if !isSSHVM && !isBastion {
+			return fmt.Errorf("only 'az ssh vm' and 'az network bastion ssh' commands are supported; use 'lily az ssh vm --resource-group <RG> --name <VM> [--command \"<cmd>\"]'")
+		}
+	case Kubectl:
+		if len(args) < 2 {
+			return fmt.Errorf("only 'kubectl exec' commands are supported; use 'lily kubectl exec <POD> [-c <container>] [-n <namespace>] -- <command>'")
+		}
+		execFound := false
+		for _, arg := range args {
+			if arg == "exec" {
+				execFound = true
+				break
+			}
+		}
+		if !execFound {
+			return fmt.Errorf("only 'kubectl exec' commands are supported; use 'lily kubectl exec <POD> [-c <container>] [-n <namespace>] -- <command>'")
+		}
+	default:
+		return fmt.Errorf("unknown provider: %s", provider)
+	}
+	return nil
+}
+
+// DetectCloudSSH checks if a command is a cloud CLI SSH command or kubectl exec and returns
+// the provider and whether it's detected. Used by the guard for rewrite.
+func DetectCloudSSH(command string) (provider Provider, rewritten string, detected bool) {
+	tokens := tokenizeCommand(command)
+	if len(tokens) == 0 {
+		return "", "", false
+	}
+
+	firstCmd := tokens[0]
+	// Strip path prefix
+	if idx := strings.LastIndex(firstCmd, "/"); idx >= 0 {
+		firstCmd = firstCmd[idx+1:]
+	}
+
+	switch firstCmd {
+	case "aws":
+		return detectAWSCloudSSH(command, tokens)
+	case "gcloud":
+		return detectGCloudCloudSSH(command, tokens)
+	case "az":
+		return detectAzureCloudSSH(command, tokens)
+	case "kubectl":
+		return detectKubectlExec(command, tokens)
+	}
+
+	return "", "", false
+}
+
+func detectAWSCloudSSH(command string, tokens []string) (Provider, string, bool) {
+	// Scan tokens for subcommand pattern at any position to prevent
+	// bypass via global CLI flags (e.g., "aws --profile admin ssm start-session").
+	for i := 1; i < len(tokens); i++ {
+		// aws ssm start-session
+		if tokens[i] == "ssm" && i+1 < len(tokens) && tokens[i+1] == "start-session" {
+			return AWS, "lily " + command, true
+		}
+		// aws ssm send-command (same execution backend, must also be intercepted)
+		if tokens[i] == "ssm" && i+1 < len(tokens) && tokens[i+1] == "send-command" {
+			return AWS, "lily " + command, true
+		}
+		// aws ec2-instance-connect ssh
+		if tokens[i] == "ec2-instance-connect" && i+1 < len(tokens) && tokens[i+1] == "ssh" {
+			return AWS, "lily " + command, true
+		}
+	}
+	return "", "", false
+}
+
+func detectGCloudCloudSSH(command string, tokens []string) (Provider, string, bool) {
+	// Scan tokens for subcommand pattern at any position to prevent
+	// bypass via global CLI flags (e.g., "gcloud --project P compute ssh INSTANCE").
+	for i := 1; i < len(tokens); i++ {
+		// gcloud compute ssh
+		if tokens[i] == "compute" && i+1 < len(tokens) && tokens[i+1] == "ssh" {
+			return GCloud, "lily " + command, true
+		}
+	}
+	return "", "", false
+}
+
+func detectAzureCloudSSH(command string, tokens []string) (Provider, string, bool) {
+	// Scan tokens for subcommand pattern at any position to prevent
+	// bypass via global CLI flags (e.g., "az --output json ssh vm").
+	for i := 1; i < len(tokens); i++ {
+		// az ssh vm
+		if tokens[i] == "ssh" && i+1 < len(tokens) && tokens[i+1] == "vm" {
+			return Azure, "lily " + command, true
+		}
+		// az network bastion ssh
+		if tokens[i] == "network" && i+2 < len(tokens) && tokens[i+1] == "bastion" && tokens[i+2] == "ssh" {
+			return Azure, "lily " + command, true
+		}
+	}
+	return "", "", false
+}
+
+func detectKubectlExec(command string, tokens []string) (Provider, string, bool) {
+	// Scan tokens for "exec" subcommand at any position to prevent
+	// bypass via global flags (e.g., "kubectl --kubeconfig /tmp/config exec POD -- cmd").
+	for i := 1; i < len(tokens); i++ {
+		if tokens[i] == "exec" {
+			return Kubectl, "lily " + command, true
+		}
+	}
+	return "", "", false
+}
+
+// tokenizeCommand splits a command string into tokens, respecting quotes.
+func tokenizeCommand(s string) []string {
+	var tokens []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+
+	for _, ch := range s {
+		switch {
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+		case (ch == ' ' || ch == '\t') && !inSingle && !inDouble:
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(ch)
+		}
+	}
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+	return tokens
+}

@@ -5,7 +5,7 @@ GOFLAGS := -trimpath -ldflags="-s -w"
 VERSION ?= $(shell grep 'Version =' internal/version/version.go | sed "s/.*= \"//;s/\".*//")
 LDFLAGS := -s -w -X internal/version.Version=$(VERSION)
 
-.PHONY: build install install-go clean test test-e2e test-verbose fmt vet snapshot release all
+.PHONY: build install install-go clean test test-e2e test-e2e-aws test-verbose fmt vet snapshot release all
 
 all: test build
 
@@ -30,6 +30,9 @@ test-verbose:
 
 test-e2e:
 	LILY_E2E=1 $(GO) test ./test/e2e/ -v -count=1 -timeout 20m
+
+test-e2e-aws:
+	LILY_E2E_AWS=1 $(GO) test ./test/e2e/ -run "^TestAWSMain$" -v -count=1 -timeout 10m
 
 fmt:
 	$(GO)fmt -w .

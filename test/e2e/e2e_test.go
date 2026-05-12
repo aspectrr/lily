@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/aspectrr/lily/internal/allowlist"
-	"github.com/aspectrr/lily/internal/mcp"
 	"github.com/aspectrr/lily/internal/readonly"
 	"github.com/aspectrr/lily/internal/sshconfig"
 	"github.com/aspectrr/lily/internal/sshexec"
@@ -344,17 +343,19 @@ func runOK(t *testing.T, ctx context.Context, ex *sshexec.Executor, host, cmd st
 // ============================================================================
 
 func TestMain(m *testing.M) {
-	if os.Getenv("LILY_E2E") == "" {
-		fmt.Fprintln(os.Stderr, "Skipping E2E tests. Set LILY_E2E=1 to run them.")
+	if os.Getenv("LILY_E2E") == "" && os.Getenv("LILY_E2E_AWS") == "" {
+		fmt.Fprintln(os.Stderr, "Skipping E2E tests. Set LILY_E2E=1 or LILY_E2E_AWS=1 to run them.")
 		os.Exit(0)
 	}
 
 	code := m.Run()
 
-	// Cleanup VMs after all tests.
-	for _, name := range []string{instanceBastion, instanceTarget} {
-		_ = limaCmd("stop", name).Run()
-		_ = limaCmd("delete", name).Run()
+	// Cleanup VMs after all tests (only if LILY_E2E was set).
+	if os.Getenv("LILY_E2E") != "" {
+		for _, name := range []string{instanceBastion, instanceTarget} {
+			_ = limaCmd("stop", name).Run()
+			_ = limaCmd("delete", name).Run()
+		}
 	}
 
 	os.Exit(code)
@@ -805,18 +806,9 @@ func TestProxyJumpPipeline(t *testing.T) {
 	}
 }
 
-// ─── MCP server integration ─────────────────────────────────────────────
+// ─── Validation integration ─────────────────────────────────────────────
 
-func TestMCPServerCreation(t *testing.T) {
-	te := getTestEnv(t)
-	cfg := &allowlist.Config{}
-	server := mcp.NewServer(te.hosts, 30*time.Second, cfg)
-	if server == nil {
-		t.Fatal("expected non-nil MCP server")
-	}
-}
-
-func TestMCPServerValidateCommand(t *testing.T) {
+func TestValidateCommand(t *testing.T) {
 	v := readonly.DefaultValidator()
 	tests := []struct {
 		cmd     string
@@ -842,7 +834,7 @@ func TestMCPServerValidateCommand(t *testing.T) {
 	}
 }
 
-func TestMCPServerRunCommand(t *testing.T) {
+func TestRunCommand(t *testing.T) {
 	te := getTestEnv(t)
 	ctx := context.Background()
 	v := readonly.DefaultValidator()
@@ -864,14 +856,14 @@ func TestMCPServerRunCommand(t *testing.T) {
 	}
 }
 
-func TestMCPServerRunCommandBlocked(t *testing.T) {
+func TestRunCommandBlocked(t *testing.T) {
 	v := readonly.DefaultValidator()
 	if err := v.ValidateCommand("rm -rf /tmp/lily-test"); err == nil {
 		t.Error("expected rm to be blocked")
 	}
 }
 
-func TestMCPServerCheckHost(t *testing.T) {
+func TestCheckHost(t *testing.T) {
 	te := getTestEnv(t)
 	ctx := context.Background()
 
@@ -890,7 +882,7 @@ func TestMCPServerCheckHost(t *testing.T) {
 	}
 }
 
-func TestMCPServerCheckHostInvalid(t *testing.T) {
+func TestCheckHostInvalid(t *testing.T) {
 	te := getTestEnv(t)
 	_, err := te.exec.Run(context.Background(), "nonexistent-host", "echo ok")
 	if err == nil {
@@ -901,7 +893,7 @@ func TestMCPServerCheckHostInvalid(t *testing.T) {
 	}
 }
 
-func TestMCPServerListAllowedCommands(t *testing.T) {
+func TestListAllowedCommands(t *testing.T) {
 	v := readonly.DefaultValidator()
 	cmds := v.AllowedCommandsList()
 	for _, want := range []string{"cat", "ls", "find", "grep", "ps", "ss", "uname"} {

@@ -6,3 +6,9 @@ dist/
 .pi
 .crush
 .crush.json
+
+# Site
+site/node_modules/
+site/dist/
+site/.astro/
+.DS_Store

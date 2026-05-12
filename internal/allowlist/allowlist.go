@@ -38,6 +38,25 @@ type Config struct {
 	// MaxOutputBytes caps the total output (stdout + stderr) per command.
 	// Defaults to 1048576 (1 MB). Minimum is 1024 (1 KB).
 	MaxOutputBytes int `yaml:"max_output_bytes"`
+
+	// Memory controls the automatic investigation memory feature.
+	// When enabled, Lily silently tracks debugging sessions and surfaces
+	// relevant past investigations when similar issues arise.
+	Memory MemoryConfig `yaml:"memory"`
+}
+
+// MemoryConfig holds settings for the investigation memory feature.
+type MemoryConfig struct {
+	// Enabled turns on automatic investigation tracking.
+	Enabled bool `yaml:"enabled"`
+
+	// SessionTimeout is the duration with no activity before an investigation
+	// is considered complete and flushed to disk. Default: "10m".
+	SessionTimeout string `yaml:"session_timeout"`
+
+	// MaxInvestigationsPerHost is the maximum number of past investigations
+	// to keep per host. Older investigations are auto-pruned. Default: 50.
+	MaxInvestigationsPerHost int `yaml:"max_investigations_per_host"`
 }
 
 // GetRateLimit parses the rate limit string into a duration.
@@ -128,6 +147,13 @@ func (c *Config) Validate() error {
 	// Validate max output bytes
 	if c.MaxOutputBytes < 0 {
 		return fmt.Errorf("max_output_bytes must be non-negative, got %d", c.MaxOutputBytes)
+	}
+
+	// Validate memory config
+	if c.Memory.Enabled && c.Memory.SessionTimeout != "" {
+		if _, err := time.ParseDuration(c.Memory.SessionTimeout); err != nil {
+			return fmt.Errorf("invalid memory.session_timeout %q: %w", c.Memory.SessionTimeout, err)
+		}
 	}
 
 	return nil
